@@ -16,7 +16,8 @@ enum class Effect(val label: String) {
     DOTS("DOTS"),         // round-dot colour mosaic
     WARP("WARP"),         // swirl / bulge distortion
     TRACK("TRACK"),       // red tracking boxes + redaction blocks
-    FRAME("FRAME")        // black canvas, tilted crop, dashed geometry
+    FRAME("FRAME"),       // black canvas, tilted crop, dashed geometry
+    MATRIX("MATRIX")      // green 1-bit dither + falling 0/1 code rain
 }
 
 object Effects {
@@ -34,6 +35,7 @@ object Effects {
             Effect.TERMINAL -> return terminal(src, amount)
             Effect.DOTS -> return dots(src, amount)
             Effect.WARP -> return warp(src, amount, seed)
+            Effect.MATRIX -> return matrix(src, amount, seed)
             else -> {}
         }
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
@@ -194,6 +196,34 @@ object Effects {
         }
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(px, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    /** MATRIX: TERMINAL dither + animated falling 0/1 columns. */
+    private fun matrix(src: Bitmap, amount: Float, seed: Long): Bitmap {
+        val out = terminal(src, amount)
+        val c = Canvas(out)
+        val w = out.width; val h = out.height
+        val cell = w / 34f
+        val cols = (w / cell).toInt().coerceAtLeast(1)
+        val rows = (h / cell).toInt().coerceAtLeast(1)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.MONOSPACE; textSize = cell * 1.1f; textAlign = Paint.Align.CENTER
+        }
+        val rnd = Random(seed)
+        val tick = (System.currentTimeMillis() / 90).toInt()
+        repeat((4 + amount * cols * 0.6f).toInt()) {
+            val col = rnd.nextInt(cols)
+            val len = 6 + rnd.nextInt(18)
+            val head = (rnd.nextInt(rows) + tick) % rows
+            for (k in 0 until len) {
+                val row = head - k
+                if (row < 0) continue
+                paint.color = if (k == 0) Color.argb(255, 215, 255, 225)
+                              else Color.argb((255 * (1f - k / len.toFloat())).toInt(), 0, 255, 65)
+                c.drawText(if (rnd.nextBoolean()) "1" else "0", (col + 0.5f) * cell, (row + 1) * cell, paint)
+            }
+        }
         return out
     }
 

@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
@@ -74,6 +75,8 @@ private class Star(val x: Float, val y: Float, val r: Float, val speed: Float, v
 @Composable
 fun WelcomeScreen(onStart: () -> Unit) {
     val density = LocalDensity.current
+    val view = LocalView.current
+    val haptics = remember(view) { Haptics(view) }
     var time by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) {
         val t0 = withFrameNanos { it }
@@ -98,9 +101,9 @@ fun WelcomeScreen(onStart: () -> Unit) {
         Modifier.fillMaxSize().onSizeChanged { size = it }
             .pointerInput(Unit) {
                 detectDragGestures(
-                    onDragStart = { drag = it },
+                    onDragStart = { drag = it; haptics.gestureStart() },
                     onDrag = { change, _ -> drag = change.position },
-                    onDragEnd = { drag = null },
+                    onDragEnd = { drag = null; haptics.gestureEnd() },
                     onDragCancel = { drag = null }
                 )
             }
@@ -172,7 +175,7 @@ fun WelcomeScreen(onStart: () -> Unit) {
                 Modifier.width(220.dp).height(60.dp).clip(RoundedCornerShape(30.dp))
                     .background(Brush.verticalGradient(listOf(Color(0x38FFFFFF), Color(0x10FFFFFF))))
                     .border(1.dp, Brush.verticalGradient(listOf(Color(0x99FFFFFF), Color(0x1AFFFFFF))), RoundedCornerShape(30.dp))
-                    .clickable(onClick = onStart),
+                    .clickable { haptics.confirm(); onStart() },
                 contentAlignment = Alignment.Center
             ) { Text("BEGIN", fontSize = 15.sp, letterSpacing = 6.sp, color = Color.White, fontWeight = FontWeight.Light) }
         }

@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -70,6 +71,8 @@ fun CameraScreen() {
     LaunchedEffect(Unit) { if (!granted) permLauncher.launch(Manifest.permission.CAMERA) }
 
     val params = remember { Params() }
+    val view = LocalView.current
+    val haptics = remember(view) { Haptics(view) }
     var selected by remember { mutableStateOf(listOf(Effect.TIME)) }
     var amount by remember { mutableFloatStateOf(0.5f) }
     var seed by remember { mutableLongStateOf(1L) }
@@ -150,7 +153,7 @@ fun CameraScreen() {
                     drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
                 }
             }
-            if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp)) { picked = null }
+            if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp)) { haptics.select(); picked = null }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -160,7 +163,7 @@ fun CameraScreen() {
                 val idx = selected.indexOf(e)
                 val sel = idx >= 0
                 Column(horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.clickable { selected = if (sel) selected - e else selected + e }) {
+                    modifier = Modifier.clickable { haptics.tick(); selected = if (sel) selected - e else selected + e }) {
                     Box(Modifier.size(78.dp)) {
                         Box(
                             Modifier.fillMaxSize().clip(CircleShape)
@@ -189,25 +192,25 @@ fun CameraScreen() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("MIN", fontSize = 10.sp, color = Color.Gray)
-                Slider(amount, { amount = it }, Modifier.weight(1f).padding(horizontal = 6.dp),
+                Slider(amount, { v -> if ((v * 10).toInt() != (amount * 10).toInt()) haptics.tick(); amount = v }, Modifier.weight(1f).padding(horizontal = 6.dp),
                     colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.DarkGray))
                 Text("MAX", fontSize = 10.sp, color = Color.Gray)
             }
-            RoundBtn("🎲") { seed = System.nanoTime() }
+            RoundBtn("🎲") { haptics.heavy(); seed = System.nanoTime() }
         }
         Spacer(Modifier.height(14.dp))
 
         // Bottom bar: grid | gallery | shutter | flip | flash
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            RoundBtn("#", active = grid) { grid = !grid }
-            RoundBtn("🖼") { galleryLauncher.launch("image/*") }
+            RoundBtn("#", active = grid) { grid = !grid; haptics.toggle(grid) }
+            RoundBtn("🖼") { haptics.select(); galleryLauncher.launch("image/*") }
             Box(
                 Modifier.size(72.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape).padding(7.dp)
                     .clip(CircleShape).background(Color.White)
-                    .clickable { frame?.let { save(activity, it) } }
+                    .clickable { haptics.shutter(); frame?.let { save(activity, it) } }
             )
-            RoundBtn("⟲") { picked = null; front = !front }
-            RoundBtn("💡", active = torch) { torch = !torch }
+            RoundBtn("⟲") { haptics.select(); picked = null; front = !front }
+            RoundBtn("💡", active = torch) { torch = !torch; haptics.toggle(torch) }
         }
     }
 }

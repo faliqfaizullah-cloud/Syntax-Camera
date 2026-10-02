@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.syntaxcam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 5
+        versionName = "1.4.0"
     }
 
     buildTypes {
@@ -29,6 +29,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    lint { checkReleaseBuilds = false }
+    lint { checkReleaseBuilds = false }
     lint { checkReleaseBuilds = false }
     lint { checkReleaseBuilds = false }
 }
