@@ -7,16 +7,35 @@ import kotlin.math.*
 import kotlin.random.Random
 
 enum class Effect(val label: String) {
-    TIME("TIME"),         // blue clock-wedge sweep + live timestamp
+    TIME("TIME"),         // blue clock wedge + live timestamp
     TILES("TILES"),       // scrambled checker mosaic
     CONFETTI("CONFETTI"), // scattered colour pixels
-    STENCIL("STENCIL")    // hard-contrast mono + blue stars
+    STENCIL("STENCIL"),   // hard-contrast mono + blue stars
+    BRICK("BRICK"),       // chunky pixel blocks + torn checker border
+    TERMINAL("TERMINAL"), // green 1-bit dithered screen
+    DOTS("DOTS"),         // round-dot colour mosaic
+    WARP("WARP"),         // swirl / bulge distortion
+    TRACK("TRACK"),       // red tracking boxes + redaction blocks
+    FRAME("FRAME")        // black canvas, tilted crop, dashed geometry
 }
 
 object Effects {
 
+    /** Applies several effects in order (the order you tapped them). */
+    fun applyAll(src: Bitmap, list: List<Effect>, amount: Float, seed: Long): Bitmap {
+        var bmp = src
+        list.forEachIndexed { i, e -> bmp = apply(bmp, e, amount, seed + i) }
+        return bmp
+    }
+
     /** amount: 0f..1f (MIN..MAX). seed changes the random layout (shuffle button). */
     fun apply(src: Bitmap, effect: Effect, amount: Float, seed: Long): Bitmap {
+        when (effect) {
+            Effect.TERMINAL -> return terminal(src, amount)
+            Effect.DOTS -> return dots(src, amount)
+            Effect.WARP -> return warp(src, amount, seed)
+            else -> {}
+        }
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
         val c = Canvas(out)
         when (effect) {
@@ -24,9 +43,15 @@ object Effects {
             Effect.TILES -> tiles(src, c, amount, seed)
             Effect.CONFETTI -> confetti(c, out.width, out.height, amount, seed)
             Effect.STENCIL -> stencil(src, c, amount, seed)
+            Effect.BRICK -> brick(src, c, amount)
+            Effect.TRACK -> track(c, out.width, out.height, amount, seed)
+            Effect.FRAME -> frame(src, c, amount, seed)
+            else -> {}
         }
         return out
     }
+
+    // ---------- original four ----------
 
     private fun time(src: Bitmap, c: Canvas, amount: Float) {
         val w = src.width.toFloat(); val h = src.height.toFloat()
@@ -120,5 +145,146 @@ object Effects {
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         path.close(); c.drawPath(path, p)
+    }
+
+    // ---------- new six ----------
+
+    /** BRICK: big hard-edged pixel blocks + two-row green/white checker border. */
+    private fun brick(src: Bitmap, c: Canvas, amount: Float) {
+        val w = src.width; val h = src.height
+        val block = (6 + amount * 34).toInt()
+        val small = Bitmap.createScaledBitmap(src, (w / block).coerceAtLeast(1), (h / block).coerceAtLeast(1), false)
+        c.drawBitmap(small, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), Paint().apply { isFilterBitmap = false })
+        val sz = w * 0.025f
+        val g = Paint().apply { color = 0xFF2E9E4F.toInt() }
+        val wh = Paint().apply { color = 0xFFEDEDED.toInt() }
+        for (row in 0..1) {
+            var i = 0; var x = 0f
+            while (x < w) {
+                val p = if ((i + row) % 2 == 0) g else wh
+                c.drawRect(x, row * sz, x + sz, (row + 1) * sz, p)
+                c.drawRect(x, h - (row + 1) * sz, x + sz, h - row * sz, p)
+                x += sz; i++
+            }
+            i = 0; var y = 0f
+            while (y < h) {
+                val p = if ((i + row) % 2 == 0) wh else g
+                c.drawRect(row * sz, y, (row + 1) * sz, y + sz, p)
+                c.drawRect(w - (row + 1) * sz, y, w - row * sz, y + sz, p)
+                y += sz; i++
+            }
+        }
+    }
+
+    /** TERMINAL: grayscale -> Bayer ordered dither -> bright green on black. */
+    private fun terminal(src: Bitmap, amount: Float): Bitmap {
+        val w = src.width; val h = src.height
+        val px = IntArray(w * h)
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+        val bias = (amount - 0.5f) * 140f
+        val on = 0xFF2BFF4F.toInt(); val off = 0xFF020A04.toInt()
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val p = px[y * w + x]
+                val lum = 0.30f * ((p shr 16) and 255) + 0.59f * ((p shr 8) and 255) + 0.11f * (p and 255)
+                val thr = (bayer[(y and 3) * 4 + (x and 3)] + 0.5f) / 16f * 255f
+                px[y * w + x] = if (lum + bias > thr) on else off
+            }
+        }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(px, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    /** DOTS: one coloured circle per cell on a dark background. */
+    private fun dots(src: Bitmap, amount: Float): Bitmap {
+        val cell = (8 + amount * 32).toInt()
+        val cols = (src.width / cell).coerceAtLeast(1)
+        val rows = (src.height / cell).coerceAtLeast(1)
+        val small = Bitmap.createScaledBitmap(src, cols, rows, true)
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        c.drawColor(Color.rgb(8, 8, 12))
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val cw = src.width / cols.toFloat(); val ch = src.height / rows.toFloat()
+        for (y in 0 until rows) for (x in 0 until cols) {
+            p.color = small.getPixel(x, y)
+            c.drawCircle((x + 0.5f) * cw, (y + 0.5f) * ch, min(cw, ch) * 0.47f, p)
+        }
+        return out
+    }
+
+    /** WARP: swirl + bulge around a random point, drawn with a bitmap mesh. */
+    private fun warp(src: Bitmap, amount: Float, seed: Long): Bitmap {
+        val n = 28
+        val w = src.width.toFloat(); val h = src.height.toFloat()
+        val k = 0.3f + amount * 1.4f
+        val rnd = Random(seed)
+        val cxN = 0.35f + rnd.nextFloat() * 0.3f
+        val cyN = 0.35f + rnd.nextFloat() * 0.3f
+        val verts = FloatArray((n + 1) * (n + 1) * 2)
+        var i = 0
+        for (j in 0..n) for (x in 0..n) {
+            val dx = x / n.toFloat() - cxN
+            val dy = j / n.toFloat() - cyN
+            val r = hypot(dx, dy)
+            val fall = exp(-r * r * 8f)
+            val ang = k * 2.2f * fall
+            val s = 1f + k * 0.9f * fall
+            val cs = cos(ang); val sn = sin(ang)
+            verts[i++] = (cxN + (dx * cs - dy * sn) * s) * w
+            verts[i++] = (cyN + (dx * sn + dy * cs) * s) * h
+        }
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        c.drawColor(Color.BLACK)
+        c.drawBitmapMesh(src, n, n, verts, 0, null, 0, null)
+        return out
+    }
+
+    /** TRACK: red outlined boxes with corner tags; some are blacked out. */
+    private fun track(c: Canvas, w: Int, h: Int, amount: Float, seed: Long) {
+        val rnd = Random(seed)
+        val red = 0xFFFF2B2B.toInt()
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = w * 0.004f + 1f; color = red }
+        val fill = Paint().apply { color = Color.argb(235, 8, 8, 8) }
+        val tag = Paint().apply { color = red }
+        repeat((3 + amount * 14).toInt()) {
+            val bw = w * (0.10f + rnd.nextFloat() * 0.25f)
+            val bh = h * (0.04f + rnd.nextFloat() * 0.14f)
+            val x = rnd.nextFloat() * (w - bw); val y = rnd.nextFloat() * (h - bh)
+            if (rnd.nextFloat() < 0.4f) c.drawRect(x, y, x + bw, y + bh, fill)
+            c.drawRect(x, y, x + bw, y + bh, stroke)
+            val t = w * 0.02f
+            c.drawRect(x + 4f, y + 4f, x + 4f + t, y + 4f + t, tag)
+        }
+    }
+
+    /** FRAME: black canvas, tilted crop of the photo, white dashed circles + lines. */
+    private fun frame(src: Bitmap, c: Canvas, amount: Float, seed: Long) {
+        val rnd = Random(seed)
+        val w = src.width.toFloat(); val h = src.height.toFloat()
+        c.drawColor(Color.BLACK)
+        val ang = (rnd.nextFloat() - 0.5f) * 16f
+        val s = 0.45f + amount * 0.5f
+        val cw = w * s; val ch = h * s * 0.9f
+        c.save()
+        c.rotate(ang, w / 2, h / 2)
+        c.clipRect(RectF(w / 2 - cw / 2, h / 2 - ch / 2, w / 2 + cw / 2, h / 2 + ch / 2))
+        c.rotate(-ang, w / 2, h / 2)
+        c.drawBitmap(src, 0f, 0f, null)
+        c.restore()
+        val dash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; color = Color.WHITE; strokeWidth = w * 0.003f + 1f
+            pathEffect = DashPathEffect(floatArrayOf(12f, 10f), 0f)
+        }
+        repeat((2 + amount * 4).toInt()) {
+            val r = w * (0.08f + rnd.nextFloat() * 0.22f)
+            c.drawCircle(w * (0.25f + rnd.nextFloat() * 0.5f), h * (0.25f + rnd.nextFloat() * 0.5f), r, dash)
+        }
+        repeat(3) {
+            c.drawLine(rnd.nextFloat() * w, rnd.nextFloat() * h * 0.5f, rnd.nextFloat() * w, h * (0.5f + rnd.nextFloat() * 0.5f), dash)
+        }
     }
 }

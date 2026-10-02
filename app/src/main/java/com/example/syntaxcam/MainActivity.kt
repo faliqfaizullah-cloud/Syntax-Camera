@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.os.Bundle
 import android.provider.MediaStore
@@ -12,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -26,6 +28,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -33,12 +36,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
 private class Params {
-    @Volatile var effect = Effect.TIME
+    @Volatile var effects: List<Effect> = listOf(Effect.TIME)
     @Volatile var amount = 0.5f
     @Volatile var seed = 1L
+    @Volatile var picked: Bitmap? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -55,17 +61,39 @@ fun CameraScreen() {
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
-    LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+    LaunchedEffect(Unit) { if (!granted) permLauncher.launch(Manifest.permission.CAMERA) }
 
     val params = remember { Params() }
-    var effect by remember { mutableStateOf(Effect.TIME) }
+    var selected by remember { mutableStateOf(listOf(Effect.TIME)) }
     var amount by remember { mutableFloatStateOf(0.5f) }
+    var seed by remember { mutableLongStateOf(1L) }
     var front by remember { mutableStateOf(false) }
+    var grid by remember { mutableStateOf(false) }
+    var torch by remember { mutableStateOf(false) }
+    var picked by remember { mutableStateOf<Bitmap?>(null) }
+    var cam by remember { mutableStateOf<Camera?>(null) }
     var frame by remember { mutableStateOf<Bitmap?>(null) }
     var thumbs by remember { mutableStateOf<Map<Effect, Bitmap>>(emptyMap()) }
-    params.effect = effect; params.amount = amount
+    params.effects = selected; params.amount = amount; params.seed = seed; params.picked = picked
     val executor = remember { Executors.newSingleThreadExecutor() }
+
+    // Gallery import
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) runCatching {
+            val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(ctx.contentResolver, uri)) { d, _, _ ->
+                d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+            picked = Bitmap.createScaledBitmap(bmp, 540, (bmp.height * 540f / bmp.width).toInt(), true)
+        }
+    }
+
+    // Re-render a gallery photo whenever settings change
+    LaunchedEffect(picked, selected, amount, seed) {
+        val p = picked ?: return@LaunchedEffect
+        frame = withContext(Dispatchers.Default) { Effects.applyAll(p, selected, amount, seed) }
+    }
+    LaunchedEffect(torch, cam) { runCatching { cam?.cameraControl?.enableTorch(torch) } }
 
     DisposableEffect(granted, front) {
         if (!granted) return@DisposableEffect onDispose {}
@@ -78,6 +106,7 @@ fun CameraScreen() {
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
             analysis.setAnalyzer(executor) { proxy ->
+                if (params.picked != null) { proxy.close(); return@setAnalyzer }
                 val raw = proxy.toBitmap()
                 val m = Matrix().apply {
                     postRotate(proxy.imageInfo.rotationDegrees.toFloat())
@@ -85,16 +114,15 @@ fun CameraScreen() {
                 }
                 val upright = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                 proxy.close()
-                val scale = 540f / upright.width
-                val small = Bitmap.createScaledBitmap(upright, 540, (upright.height * scale).toInt(), true)
-                frame = Effects.apply(small, params.effect, params.amount, params.seed)
+                val small = Bitmap.createScaledBitmap(upright, 540, (upright.height * 540f / upright.width).toInt(), true)
+                frame = Effects.applyAll(small, params.effects, params.amount, params.seed)
                 if (counter++ % 10 == 0) {
                     val tiny = Bitmap.createScaledBitmap(small, 120, (small.height * 120f / small.width).toInt(), true)
                     thumbs = Effect.values().associateWith { Effects.apply(tiny, it, 0.5f, 7L) }
                 }
             }
             provider.unbindAll()
-            provider.bindToLifecycle(
+            cam = provider.bindToLifecycle(
                 activity,
                 if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
                 analysis
@@ -107,29 +135,40 @@ fun CameraScreen() {
         Modifier.fillMaxSize().background(Color.Black).statusBarsPadding().navigationBarsPadding().padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Preview card with corner buttons
-        Box(
-            Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Color(0xFF0E0E0E))
-        ) {
-            frame?.let {
-                Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        // Preview
+        Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Color(0xFF0E0E0E))) {
+            frame?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+            if (grid) Canvas(Modifier.fillMaxSize()) {
+                val c = Color(0x88FFFFFF)
+                for (i in 1..2) {
+                    drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), 2f)
+                    drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
+                }
             }
-            RoundBtn("⟲", Modifier.align(Alignment.BottomEnd).padding(12.dp)) { front = !front }
+            if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp)) { picked = null }
         }
         Spacer(Modifier.height(14.dp))
 
-        // Effect carousel (circular thumbs + label)
+        // Effect carousel: tap to add/remove; number = order applied
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             items(Effect.values().toList()) { e ->
-                val sel = e == effect
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { effect = e }) {
-                    Box(
-                        Modifier.size(78.dp).clip(CircleShape)
-                            .border(if (sel) 2.dp else 0.dp, Color.White, CircleShape)
-                            .background(Color(0xFF222222))
-                    ) {
-                        thumbs[e]?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-                        Box(Modifier.size(14.dp).clip(CircleShape).background(Color(0xFF111111)).align(Alignment.Center))
+                val idx = selected.indexOf(e)
+                val sel = idx >= 0
+                Column(horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clickable { selected = if (sel) selected - e else selected + e }) {
+                    Box(Modifier.size(78.dp)) {
+                        Box(
+                            Modifier.fillMaxSize().clip(CircleShape)
+                                .border(if (sel) 2.dp else 0.dp, Color.White, CircleShape)
+                                .background(Color(0xFF222222))
+                        ) {
+                            thumbs[e]?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+                            Box(Modifier.size(14.dp).clip(CircleShape).background(Color(0xFF111111)).align(Alignment.Center))
+                        }
+                        if (sel) Box(
+                            Modifier.size(22.dp).clip(CircleShape).background(Color(0xFF2F7BFF)).align(Alignment.BottomEnd),
+                            contentAlignment = Alignment.Center
+                        ) { Text("${idx + 1}", fontSize = 11.sp, color = Color.White) }
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(e.label, fontSize = 11.sp, color = if (sel) Color.White else Color.Gray)
@@ -138,7 +177,7 @@ fun CameraScreen() {
         }
         Spacer(Modifier.height(14.dp))
 
-        // Controls: MIN—slider—MAX + shuffle + shutter
+        // MIN—MAX slider + shuffle
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0xFF1C1C1C)).padding(horizontal = 14.dp),
@@ -149,21 +188,30 @@ fun CameraScreen() {
                     colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.DarkGray))
                 Text("MAX", fontSize = 10.sp, color = Color.Gray)
             }
-            RoundBtn("🎲") { params.seed = System.nanoTime() }
+            RoundBtn("🎲") { seed = System.nanoTime() }
         }
         Spacer(Modifier.height(14.dp))
-        Box(
-            Modifier.size(72.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape).padding(7.dp)
-                .clip(CircleShape).background(Color.White)
-                .clickable { frame?.let { save(activity, it) } }
-        )
+
+        // Bottom bar: grid | gallery | shutter | flip | flash
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            RoundBtn("#", active = grid) { grid = !grid }
+            RoundBtn("🖼") { galleryLauncher.launch("image/*") }
+            Box(
+                Modifier.size(72.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape).padding(7.dp)
+                    .clip(CircleShape).background(Color.White)
+                    .clickable { frame?.let { save(activity, it) } }
+            )
+            RoundBtn("⟲") { picked = null; front = !front }
+            RoundBtn("💡", active = torch) { torch = !torch }
+        }
     }
 }
 
 @Composable
-private fun RoundBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, onClick: () -> Unit) {
     Box(
-        modifier.size(52.dp).clip(CircleShape).background(Color(0xCC1C1C1C)).clickable(onClick = onClick),
+        modifier.size(52.dp).clip(CircleShape)
+            .background(if (active) Color(0xFF2F7BFF) else Color(0xCC1C1C1C)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, fontSize = 20.sp, color = Color.White) }
 }
