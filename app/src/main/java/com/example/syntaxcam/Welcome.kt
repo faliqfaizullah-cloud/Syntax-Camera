@@ -1,183 +1,179 @@
 package com.example.syntaxcam
 
-import android.annotation.SuppressLint
-import android.graphics.RenderEffect
-import android.graphics.RuntimeShader
-import android.os.Build
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import kotlin.math.sin
 import kotlin.random.Random
 
-/**
- * AGSL (Android 13+) liquid-glass lens: magnifies + bends whatever is behind it,
- * splits colour channels near the rim (chromatic aberration) and adds a specular edge.
- */
-private const val LENS_AGSL = """
-uniform shader content;
-uniform float2 center;
-uniform float radius;
-uniform float time;
-
-half4 main(float2 p) {
-    float2 d = p - center;
-    float dist = length(d);
-    float t = dist / radius;
-    if (t >= 1.0) { return content.eval(p); }
-
-    float lens = 1.0 - t * t;
-    float2 wobble = float2(sin(time * 1.6 + p.y * 0.03), cos(time * 1.4 + p.x * 0.03)) * 5.0 * lens;
-    float2 dir = normalize(d + float2(0.0001, 0.0001));
-    float2 off = d * (-0.45 * lens) + wobble;
-    float ca = 7.0 * t * t;
-
-    float r = content.eval(p + off + dir * ca).r;
-    float g = content.eval(p + off).g;
-    float b = content.eval(p + off - dir * ca).b;
-    float3 rgb = float3(r, g, b);
-
-    float rim = smoothstep(0.84, 1.0, t);
-    float spec = pow(max(0.0, dot(normalize(float2(-0.6, -0.8)), -dir)), 6.0) * rim;
-    rgb += float3(0.05, 0.06, 0.11) * lens;
-    rgb += float3(0.55) * spec + float3(0.07) * rim;
-    return half4(half3(rgb), 1.0);
-}
-"""
-
 private class Star(val x: Float, val y: Float, val r: Float, val speed: Float, val phase: Float)
 
-@SuppressLint("NewApi")
+/** Black starfield, chrome balloon-style title, glowing planet horizon, swipe up to enter. */
 @Composable
 fun WelcomeScreen(onStart: () -> Unit) {
     val density = LocalDensity.current
     val view = LocalView.current
     val haptics = remember(view) { Haptics(view) }
+    val scope = rememberCoroutineScope()
+    val progress = remember { Animatable(0f) }
+    val intro = remember { Animatable(0f) }
+    var lastStep by remember { mutableIntStateOf(0) }
     var time by remember { mutableFloatStateOf(0f) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+
     LaunchedEffect(Unit) {
+        launch { intro.animateTo(1f, tween(1500, easing = FastOutSlowInEasing)) }
         val t0 = withFrameNanos { it }
         while (true) withFrameNanos { time = (it - t0) / 1_000_000_000f }
     }
-    var size by remember { mutableStateOf(IntSize.Zero) }
-    var drag by remember { mutableStateOf<Offset?>(null) }
     val stars = remember {
-        val rnd = Random(42)
-        List(170) { Star(rnd.nextFloat(), rnd.nextFloat(), 0.6f + rnd.nextFloat() * 1.8f, 0.6f + rnd.nextFloat() * 2f, rnd.nextFloat() * 6.28f) }
+        val rnd = Random(11)
+        List(230) { Star(rnd.nextFloat(), rnd.nextFloat(), 0.4f + rnd.nextFloat() * 1.1f, 0.4f + rnd.nextFloat() * 1.6f, rnd.nextFloat() * 6.28f) }
     }
-    val radiusPx = with(density) { 110.dp.toPx() }
-    val shader = remember { if (Build.VERSION.SDK_INT >= 33) RuntimeShader(LENS_AGSL) else null }
-
-    // Lens drifts on its own until the user drags it
-    val center = drag ?: Offset(
-        size.width * (0.5f + 0.28f * sin(time * 0.5f)),
-        size.height * (0.40f + 0.12f * sin(time * 0.37f + 1f))
-    )
+    val enter: () -> Unit = {
+        scope.launch {
+            haptics.confirm()
+            progress.animateTo(1f, tween(500))
+            onStart()
+        }
+    }
 
     Box(
         Modifier.fillMaxSize().onSizeChanged { size = it }
             .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { drag = it; haptics.gestureStart() },
-                    onDrag = { change, _ -> drag = change.position },
-                    onDragEnd = { drag = null; haptics.gestureEnd() },
-                    onDragCancel = { drag = null }
+                detectVerticalDragGestures(
+                    onDragStart = { haptics.gestureStart() },
+                    onVerticalDrag = { change, dy ->
+                        change.consume()
+                        scope.launch { progress.snapTo((progress.value - dy / (size.height * 0.6f)).coerceIn(0f, 1f)) }
+                        val step = (progress.value * 10).toInt()
+                        if (step != lastStep) { lastStep = step; haptics.tick() }
+                    },
+                    onDragEnd = {
+                        scope.launch {
+                            if (progress.value > 0.3f) enter()
+                            else { haptics.gestureEnd(); progress.animateTo(0f, spring()) }
+                        }
+                    },
+                    onDragCancel = { scope.launch { progress.animateTo(0f) } }
                 )
             }
     ) {
-        // Layer that gets bent by the lens: sky + title
-        Box(
-            Modifier.fillMaxSize().graphicsLayer {
-                if (Build.VERSION.SDK_INT >= 33 && shader != null) {
-                    shader.setFloatUniform("center", center.x, center.y)
-                    shader.setFloatUniform("radius", radiusPx)
-                    shader.setFloatUniform("time", time)
-                    renderEffect = RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
-                }
+        // Sky + planet
+        Canvas(Modifier.fillMaxSize()) {
+            val w = this.size.width; val h = this.size.height
+            drawRect(Color.Black)
+            stars.forEach { s ->
+                val y = ((s.y + time * s.speed * 0.003f) % 1f) * h
+                val a = (0.12f + 0.5f * (sin(time * s.speed + s.phase) * 0.5f + 0.5f)) * intro.value
+                drawCircle(Color.White.copy(alpha = a), s.r * density.density, Offset(s.x * w, y))
             }
-        ) {
-            Canvas(Modifier.fillMaxSize()) {
-                drawRect(Brush.verticalGradient(listOf(Color(0xFF04020D), Color(0xFF0A0722), Color(0xFF170B33))))
-                drawCircle(
-                    Brush.radialGradient(listOf(Color(0x668A4DFF), Color.Transparent),
-                        center = Offset(size.width * 0.2f, size.height * 0.25f), radius = size.width * 0.7f),
-                    radius = size.width * 0.7f, center = Offset(size.width * 0.2f, size.height * 0.25f)
-                )
-                drawCircle(
-                    Brush.radialGradient(listOf(Color(0x552F7BFF), Color.Transparent),
-                        center = Offset(size.width * 0.85f, size.height * 0.6f), radius = size.width * 0.8f),
-                    radius = size.width * 0.8f, center = Offset(size.width * 0.85f, size.height * 0.6f)
-                )
-                drawCircle(
-                    Brush.radialGradient(listOf(Color(0x44FF4DC8), Color.Transparent),
-                        center = Offset(size.width * 0.5f, size.height * 0.95f), radius = size.width * 0.6f),
-                    radius = size.width * 0.6f, center = Offset(size.width * 0.5f, size.height * 0.95f)
-                )
-                // constellation
-                val pts = stars.take(9).map { Offset(it.x * size.width, it.y * size.height) }
-                for (i in 0 until pts.size - 1) drawLine(Color(0x33FFFFFF), pts[i], pts[i + 1], 1.5f)
-                // twinkling stars
-                stars.forEach { s ->
-                    val a = 0.35f + 0.65f * (sin(time * s.speed + s.phase) * 0.5f + 0.5f)
-                    drawCircle(Color.White.copy(alpha = a), s.r * density.density, Offset(s.x * size.width, s.y * size.height))
-                }
-            }
-            Column(
-                Modifier.align(Alignment.TopCenter).padding(top = 140.dp).fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("SYNTAX CAM", fontSize = 34.sp, fontWeight = FontWeight.Thin, letterSpacing = 9.sp,
-                    color = Color.White, textAlign = TextAlign.Center)
-                Spacer(Modifier.height(12.dp))
-                Text("see the night differently", fontSize = 14.sp, letterSpacing = 3.sp,
-                    color = Color(0xB3FFFFFF), textAlign = TextAlign.Center)
-            }
+            val pr = w * 0.98f
+            val cx = w / 2f
+            val top = h * (0.74f + 0.25f * (1f - intro.value)) - progress.value * h * 0.95f
+            val cy = top + pr
+            // atmosphere halo
+            drawCircle(
+                Brush.radialGradient(
+                    0.86f to Color.Transparent, 0.95f to Color(0x3A6A9CFF), 1f to Color.Transparent,
+                    center = Offset(cx, cy), radius = pr * 1.18f
+                ), radius = pr * 1.18f, center = Offset(cx, cy)
+            )
+            // body
+            drawCircle(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF2C323E), Color(0xFF161C26), Color(0xFF123B48), Color(0xFF1C6A80)),
+                    startY = top, endY = top + pr * 1.1f
+                ), pr, Offset(cx, cy)
+            )
+            // soft rim glow + sharp rim light
+            drawCircle(
+                Brush.verticalGradient(listOf(Color(0x66BBD2F5), Color.Transparent), startY = top, endY = top + pr * 0.5f),
+                pr + 5.dp.toPx(), Offset(cx, cy), style = Stroke(width = 18.dp.toPx())
+            )
+            drawCircle(
+                Brush.verticalGradient(listOf(Color(0xFFF2F6FF), Color(0x88C6D6F0), Color.Transparent), startY = top, endY = top + pr * 0.55f),
+                pr, Offset(cx, cy), style = Stroke(width = 4.dp.toPx())
+            )
         }
 
-        // Fallback glass disc for Android 10-12 (no AGSL): frosted circle, no displacement
-        if (shader == null) Canvas(Modifier.fillMaxSize()) {
-            drawCircle(Brush.radialGradient(listOf(Color(0x33FFFFFF), Color(0x0AFFFFFF)), center = center, radius = radiusPx),
-                radiusPx, center)
-            drawCircle(Color(0x66FFFFFF), radiusPx, center, style = Stroke(2f))
-        }
-
-        // Glass button + hint
+        // Chrome balloon title
         Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 72.dp),
+            Modifier.align(Alignment.Center).offset(y = (-96).dp).graphicsLayer {
+                translationY = sin(time * 1.2f) * 6.dp.toPx() - progress.value * this.size.height * 0.6f
+                rotationZ = sin(time * 0.7f) * 1.2f
+                val sc = 0.88f + 0.12f * intro.value
+                scaleX = sc; scaleY = sc
+                alpha = intro.value * (1f - progress.value * 1.5f).coerceIn(0f, 1f)
+            },
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("drag to bend the light", fontSize = 12.sp, letterSpacing = 2.sp, color = Color(0x80FFFFFF))
-            Spacer(Modifier.height(18.dp))
-            Box(
-                Modifier.width(220.dp).height(60.dp).clip(RoundedCornerShape(30.dp))
-                    .background(Brush.verticalGradient(listOf(Color(0x38FFFFFF), Color(0x10FFFFFF))))
-                    .border(1.dp, Brush.verticalGradient(listOf(Color(0x99FFFFFF), Color(0x1AFFFFFF))), RoundedCornerShape(30.dp))
-                    .clickable { haptics.confirm(); onStart() },
-                contentAlignment = Alignment.Center
-            ) { Text("BEGIN", fontSize = 15.sp, letterSpacing = 6.sp, color = Color.White, fontWeight = FontWeight.Light) }
+            Chrome("SYN", 104, -4f, Modifier.offset(x = (-20).dp))
+            Chrome("TAX", 104, 3f, Modifier.offset(x = 16.dp, y = (-26).dp))
+            Chrome("CAM", 104, -2f, Modifier.offset(x = (-8).dp, y = (-52).dp))
         }
+
+        Text(
+            "Swipe up to enter",
+            Modifier.align(Alignment.BottomCenter).padding(bottom = 110.dp)
+                .graphicsLayer { alpha = (0.55f + 0.3f * sin(time * 2f)) * (1f - progress.value) * intro.value }
+                .clickable { enter() },
+            color = Color(0xCCDDE6F0), fontSize = 17.sp, letterSpacing = 0.5.sp
+        )
+
+        // fade to black as the planet fills the screen
+        Box(Modifier.fillMaxSize().drawBehind {
+            val p = progress.value
+            drawRect(Color.Black.copy(alpha = p * p * p))
+        })
+    }
+}
+
+/** Faux inflated-chrome lettering: silver outline, blue-steel gradient fill, white specular edge. */
+@Composable
+private fun Chrome(text: String, sizeSp: Int, rot: Float, modifier: Modifier = Modifier) {
+    val base = TextStyle(
+        fontSize = sizeSp.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.SansSerif,
+        letterSpacing = (-3).sp, lineHeight = sizeSp.sp
+    )
+    Box(modifier.graphicsLayer { rotationZ = rot }) {
+        Text(text, style = base.copy(
+            brush = Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFF6F7480))),
+            drawStyle = Stroke(width = 30f, join = StrokeJoin.Round)))
+        Text(text, style = base.copy(
+            brush = Brush.verticalGradient(
+                0f to Color(0xFFF7FAFF), 0.28f to Color(0xFFA9C0F0), 0.5f to Color(0xFF28437F),
+                0.72f to Color(0xFF7E9AD6), 1f to Color(0xFFDDE6F5))))
+        Text(text, style = base.copy(
+            brush = SolidColor(Color.White.copy(alpha = 0.5f)),
+            drawStyle = Stroke(width = 2f, join = StrokeJoin.Round)))
     }
 }

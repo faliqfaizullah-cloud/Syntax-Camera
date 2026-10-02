@@ -54,14 +54,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 var welcome by remember { mutableStateOf(true) }
-                if (welcome) WelcomeScreen { welcome = false } else CameraScreen()
+                var gallery by remember { mutableStateOf(false) }
+                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                    if (!welcome) CameraScreen(onOpenGallery = { gallery = true })
+                    if (gallery) GalleryScreen(onClose = { gallery = false })
+                    if (welcome) WelcomeScreen { welcome = false }
+                }
             }
         }
     }
 }
 
 @Composable
-fun CameraScreen() {
+fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     val ctx = LocalContext.current
     val activity = ctx as ComponentActivity
     var granted by remember {
@@ -154,6 +159,7 @@ fun CameraScreen() {
                 }
             }
             if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp)) { haptics.select(); picked = null }
+            RoundBtn("🗓", Modifier.align(Alignment.TopEnd).padding(12.dp)) { haptics.select(); onOpenGallery() }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -225,6 +231,7 @@ private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boole
 }
 
 private fun save(activity: ComponentActivity, bmp: Bitmap) {
+    Shots.add(activity, bmp)
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, "SyntaxCam_${System.currentTimeMillis()}.jpg")
         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
