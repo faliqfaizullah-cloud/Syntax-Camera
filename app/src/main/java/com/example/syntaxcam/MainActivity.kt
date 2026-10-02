@@ -50,7 +50,12 @@ private class Params {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme(colorScheme = darkColorScheme()) { CameraScreen() } }
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                var welcome by remember { mutableStateOf(true) }
+                if (welcome) WelcomeScreen { welcome = false } else CameraScreen()
+            }
+        }
     }
 }
 
