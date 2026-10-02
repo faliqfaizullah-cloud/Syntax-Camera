@@ -17,7 +17,8 @@ enum class Effect(val label: String) {
     WARP("WARP"),         // swirl / bulge distortion
     TRACK("TRACK"),       // red tracking boxes + redaction blocks
     FRAME("FRAME"),       // black canvas, tilted crop, dashed geometry
-    MATRIX("MATRIX")      // green 1-bit dither + falling 0/1 code rain
+    MATRIX("MATRIX"),     // green 1-bit dither + falling 0/1 code rain
+    SPIDE("SPIDE")        // red bugs: photo-filled cutouts, or red bugs over the photo
 }
 
 object Effects {
@@ -36,6 +37,7 @@ object Effects {
             Effect.DOTS -> return dots(src, amount)
             Effect.WARP -> return warp(src, amount, seed)
             Effect.MATRIX -> return matrix(src, amount, seed)
+            Effect.SPIDE -> return spide(src, amount, seed)
             else -> {}
         }
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
@@ -154,7 +156,7 @@ object Effects {
     /** BRICK: big hard-edged pixel blocks + two-row green/white checker border. */
     private fun brick(src: Bitmap, c: Canvas, amount: Float) {
         val w = src.width; val h = src.height
-        val block = (6 + amount * 34).toInt()
+        val block = ((6 + amount * 34) * (w / 540f)).toInt().coerceAtLeast(2)
         val small = Bitmap.createScaledBitmap(src, (w / block).coerceAtLeast(1), (h / block).coerceAtLeast(1), false)
         c.drawBitmap(small, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), Paint().apply { isFilterBitmap = false })
         val sz = w * 0.025f
@@ -185,18 +187,70 @@ object Effects {
         src.getPixels(px, 0, w, 0, 0, w, h)
         val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
         val bias = (amount - 0.5f) * 140f
+        val ks = (w / 540f).toInt().coerceAtLeast(1)
         val on = 0xFF2BFF4F.toInt(); val off = 0xFF020A04.toInt()
         for (y in 0 until h) {
             for (x in 0 until w) {
                 val p = px[y * w + x]
                 val lum = 0.30f * ((p shr 16) and 255) + 0.59f * ((p shr 8) and 255) + 0.11f * (p and 255)
-                val thr = (bayer[(y and 3) * 4 + (x and 3)] + 0.5f) / 16f * 255f
+                val thr = (bayer[((y / ks) and 3) * 4 + ((x / ks) and 3)] + 0.5f) / 16f * 255f
                 px[y * w + x] = if (lum + bias > thr) on else off
             }
         }
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(px, 0, w, 0, 0, w, h)
         return out
+    }
+
+    /** SPIDE: red bugs. Even seed = red bugs over the photo; odd seed (shuffle) = red field, photo only inside the bugs. */
+    private fun spide(src: Bitmap, amount: Float, seed: Long): Bitmap {
+        val w = src.width; val h = src.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val rnd = Random(seed)
+        val red = 0xFFFF3B30.toInt()
+        val body = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = red; style = Paint.Style.FILL }
+        val leg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = red; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        }
+        val n = (6 + amount * 24).toInt()
+        fun scatter() {
+            repeat(n) {
+                val s = w * (0.07f + rnd.nextFloat() * 0.07f)
+                bug(c, rnd.nextFloat() * w, rnd.nextFloat() * h, s, rnd.nextFloat() * 360f, body, leg)
+            }
+        }
+        if (seed % 2L == 0L) {
+            c.drawBitmap(src, 0f, 0f, null)
+            scatter()
+        } else {
+            c.drawColor(red)
+            val layer = c.saveLayer(0f, 0f, w.toFloat(), h.toFloat(), null)
+            scatter()
+            c.drawBitmap(src, 0f, 0f, Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN) })
+            c.restoreToCount(layer)
+        }
+        return out
+    }
+
+    private fun bug(c: Canvas, cx: Float, cy: Float, s: Float, rot: Float, body: Paint, leg: Paint) {
+        c.save(); c.translate(cx, cy); c.rotate(rot)
+        leg.strokeWidth = s * 0.10f
+        val p = Path()
+        for (side in intArrayOf(-1, 1)) for (i in 0..2) {
+            val y0 = (i - 1) * s * 0.20f
+            p.reset()
+            p.moveTo(side * s * 0.10f, y0)
+            p.lineTo(side * s * 0.36f, y0 - s * 0.14f + i * s * 0.05f)
+            p.lineTo(side * s * 0.52f, y0 + s * 0.10f + i * s * 0.07f)
+            c.drawPath(p, leg)
+        }
+        c.drawLine(-s * 0.05f, -s * 0.36f, -s * 0.18f, -s * 0.52f, leg)
+        c.drawLine(s * 0.05f, -s * 0.36f, s * 0.18f, -s * 0.52f, leg)
+        c.drawOval(RectF(-s * 0.22f, s * 0.04f, s * 0.22f, s * 0.46f), body)
+        c.drawOval(RectF(-s * 0.15f, -s * 0.20f, s * 0.15f, s * 0.12f), body)
+        c.drawOval(RectF(-s * 0.12f, -s * 0.38f, s * 0.12f, -s * 0.16f), body)
+        c.restore()
     }
 
     /** MATRIX: TERMINAL dither + animated falling 0/1 columns. */
@@ -229,7 +283,7 @@ object Effects {
 
     /** DOTS: one coloured circle per cell on a dark background. */
     private fun dots(src: Bitmap, amount: Float): Bitmap {
-        val cell = (8 + amount * 32).toInt()
+        val cell = ((8 + amount * 32) * (src.width / 540f)).toInt().coerceAtLeast(2)
         val cols = (src.width / cell).coerceAtLeast(1)
         val rows = (src.height / cell).coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(src, cols, rows, true)
@@ -307,7 +361,7 @@ object Effects {
         c.restore()
         val dash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE; color = Color.WHITE; strokeWidth = w * 0.003f + 1f
-            pathEffect = DashPathEffect(floatArrayOf(12f, 10f), 0f)
+            pathEffect = DashPathEffect(floatArrayOf(12f * w / 540f, 10f * w / 540f), 0f)
         }
         repeat((2 + amount * 4).toInt()) {
             val r = w * (0.08f + rnd.nextFloat() * 0.22f)

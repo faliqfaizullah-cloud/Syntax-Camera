@@ -5,7 +5,8 @@ import android.view.HapticFeedbackConstants as H
 import android.view.View
 
 class Haptics(private val view: View) {
-    private fun go(c: Int) { view.performHapticFeedback(c) }
+    var enabled = true
+    private fun go(c: Int) { if (enabled) view.performHapticFeedback(c) }
     private fun api30(c30: Int, fallback: Int) = go(if (Build.VERSION.SDK_INT >= 30) c30 else fallback)
 
     fun tick() = go(H.CLOCK_TICK)                       // effect taps, slider steps
@@ -15,5 +16,5 @@ class Haptics(private val view: View) {
     fun gestureStart() = api30(H.GESTURE_START, H.VIRTUAL_KEY)
     fun gestureEnd() = api30(H.GESTURE_END, H.CLOCK_TICK)
     fun toggle(on: Boolean) = if (on) confirm() else select()
-    fun shutter() { heavy(); view.postDelayed({ confirm() }, 70) }  // double-knock
+    fun shutter() { heavy(); view.postDelayed({ confirm() }, 70L) }  // double-knock
 }

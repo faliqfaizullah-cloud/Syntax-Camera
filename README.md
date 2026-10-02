@@ -9,4 +9,3 @@ git push -u origin main
 git tag v1.0.0 && git push origin v1.0.0
 ```
 GitHub Actions builds `SyntaxCam.apk` and attaches it to the release.
-# Syntax-Camera

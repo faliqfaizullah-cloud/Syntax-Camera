@@ -41,8 +41,13 @@ import java.util.Locale
 object Shots {
     private fun dir(ctx: Context) = File(ctx.filesDir, "shots").apply { mkdirs() }
     fun add(ctx: Context, bmp: Bitmap) {
+        val m = maxOf(bmp.width, bmp.height)
+        val b = if (m > 1600) {
+            val s = 1600f / m
+            Bitmap.createScaledBitmap(bmp, (bmp.width * s).toInt(), (bmp.height * s).toInt(), true)
+        } else bmp
         val f = File(dir(ctx), "${System.currentTimeMillis()}.jpg")
-        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        f.outputStream().use { b.compress(Bitmap.CompressFormat.JPEG, 92, it) }
     }
     fun list(ctx: Context): List<File> =
         dir(ctx).listFiles()?.filter { it.extension == "jpg" }?.sortedByDescending { it.name } ?: emptyList()
@@ -153,7 +158,7 @@ fun GalleryScreen(onClose: () -> Unit) {
             val pager = rememberPagerState { list.size }
             Box(Modifier.fillMaxSize().background(Color.Black)) {
                 HorizontalPager(pager, Modifier.fillMaxSize()) { i ->
-                    Thumb(list[i], Modifier.fillMaxSize(), ContentScale.Fit)
+                    Thumb(list[i], Modifier.fillMaxSize(), ContentScale.Fit, 2000)
                 }
                 Row(Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)) {
                     Pill("✕") { haptics.select(); open = null }
@@ -197,9 +202,15 @@ private fun DayCell(day: Int, shots: List<File>?, isToday: Boolean, onClick: () 
 }
 
 @Composable
-private fun Thumb(file: File, modifier: Modifier, scale: ContentScale) {
+private fun Thumb(file: File, modifier: Modifier, scale: ContentScale, maxDim: Int = 600) {
     val bmp by produceState<Bitmap?>(null, file) {
-        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(file.path) }
+        value = withContext(Dispatchers.IO) {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, o)
+            var s = 1
+            while (maxOf(o.outWidth, o.outHeight) / (s * 2) >= maxDim) s *= 2
+            BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = s })
+        }
     }
     bmp?.let { Image(it.asImageBitmap(), null, modifier, contentScale = scale) }
 }
