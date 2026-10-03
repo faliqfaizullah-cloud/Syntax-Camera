@@ -112,6 +112,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     var focusPt by remember { mutableStateOf<Offset?>(null) }
     var flashing by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var reveal by remember { mutableStateOf<RevealData?>(null) }
+    var revealOn by remember { mutableStateOf(prefs.getBoolean("reveal", true)) }
+    val onReveal: (RevealData) -> Unit = { r -> if (revealOn) reveal = r else toast(activity, "Saved ${r.note}") }
 
     var selected by remember { mutableStateOf(listOf(Effect.TIME)) }
     var amount by remember { mutableFloatStateOf(0.5f) }
@@ -225,7 +228,11 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         val cap = capture
         val f = frame
         if (picked != null || cap == null) {
-            if (f != null) ioExecutor.execute { save(activity, f); toast(activity, "Saved ${f.width}×${f.height}") }
+            if (f != null) ioExecutor.execute {
+                save(activity, f)
+                val r = makeReveal(f, "${f.width}×${f.height}")
+                activity.runOnUiThread { onReveal(r) }
+            }
             return@shoot
         }
         if (busy) return@shoot
@@ -253,7 +260,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                         }
                         if (mirror) bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height,
                             Matrix().apply { postScale(-1f, 1f) }, true)
-                        processAndSave(activity, bmp, effects, amt, sd, " + RAW")
+                        processAndSave(activity, bmp, effects, amt, sd, " + RAW", onReveal)
                     } catch (e: Throwable) {
                         toast(activity, "Save failed: ${e.message}")
                     } finally { tmp.delete(); busy = false }
@@ -272,7 +279,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                             if (mirror) postScale(-1f, 1f)
                         }
                         val up = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
-                        processAndSave(activity, up, effects, amt, sd, "")
+                        processAndSave(activity, up, effects, amt, sd, "", onReveal)
                     } catch (e: Throwable) {
                         toast(activity, "Save failed: ${e.message}")
                     } finally { image.close(); busy = false }
@@ -417,6 +424,8 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             }
         }
 
+        reveal?.let { CaptureReveal(it, haptics) { reveal = null } }
+
         if (showSettings) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { showSettings = false }) {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth()
@@ -458,6 +467,10 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                     )
                 }
 
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Label("CAPTURE GLOW"); Spacer(Modifier.weight(1f))
+                    Switch(revealOn, { revealOn = it; prefs.edit().putBoolean("reveal", it).apply() })
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Label("HAPTICS"); Spacer(Modifier.weight(1f))
                     Switch(hapticsOn, { hapticsOn = it; prefs.edit().putBoolean("haptics", it).apply() })
@@ -506,7 +519,7 @@ private fun toast(activity: ComponentActivity, msg: String) =
     activity.runOnUiThread { Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show() }
 
 /** Applies the chosen effects (capped at ~3000 px so memory stays safe) and saves to Pictures/SyntaxCam + the in-app gallery. */
-private fun processAndSave(activity: ComponentActivity, src: Bitmap, effects: List<Effect>, amount: Float, seed: Long, note: String) {
+private fun processAndSave(activity: ComponentActivity, src: Bitmap, effects: List<Effect>, amount: Float, seed: Long, note: String, onDone: (RevealData) -> Unit) {
     var bmp = src
     val m = maxOf(bmp.width, bmp.height)
     if (effects.isNotEmpty() && m > 3072) {
@@ -515,7 +528,8 @@ private fun processAndSave(activity: ComponentActivity, src: Bitmap, effects: Li
     }
     val result = if (effects.isEmpty()) bmp else Effects.applyAll(bmp, effects, amount, seed)
     save(activity, result)
-    toast(activity, "Saved ${result.width}×${result.height}$note")
+    val r = makeReveal(result, "${result.width}×${result.height}$note")
+    activity.runOnUiThread { onDone(r) }
 }
 
 private fun save(activity: ComponentActivity, bmp: Bitmap) {
