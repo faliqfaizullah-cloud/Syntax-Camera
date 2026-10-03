@@ -48,6 +48,7 @@ object Shots {
         } else bmp
         val f = File(dir(ctx), "${System.currentTimeMillis()}.jpg")
         f.outputStream().use { b.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        runCatching { SyntaxWidgetProvider.refreshAll(ctx) }
     }
     fun list(ctx: Context): List<File> =
         dir(ctx).listFiles()?.filter { it.extension == "jpg" }?.sortedByDescending { it.name } ?: emptyList()
@@ -167,6 +168,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                         haptics.heavy()
                         list[pager.currentPage].delete()
                         files = Shots.list(ctx)
+                        Thread { runCatching { SyntaxWidgetProvider.refreshAll(ctx) } }.start()
                         open = list.filter { it.exists() }.ifEmpty { null }
                     }
                 }
