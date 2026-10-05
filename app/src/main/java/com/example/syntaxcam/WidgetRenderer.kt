@@ -9,22 +9,19 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.*
 import android.widget.RemoteViews
+import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.random.Random
 
-const val THEME_GLASS = 0      // iOS 26-style frosted glass
 const val THEME_LIGHT = 1      // solid white
-const val THEME_DARK = 2       // solid dark
-const val THEME_GRADIENT = 3   // gradient + progressive blur
+const val THEME_DARK = 2       // solid near-black
 
 data class WidgetConfig(
-    val theme: Int = THEME_GLASS,
-    val colorA: Int = 0xFFFFFFFF.toInt(),   // glass tint / gradient start
-    val colorB: Int = 0xFF9B5CFF.toInt(),   // gradient end
-    val roundness: Float = 0.17f,           // corner radius as a share of the short side (0.17 = reference tile)
+    val theme: Int = THEME_LIGHT,
+    val roundness: Float = 0.17f,   // corner radius as a share of the short side (0.17 = reference tile)
     val showLabel: Boolean = true,
     val shuffle: Boolean = false
 )
@@ -33,14 +30,13 @@ object WidgetStore {
     private fun p(ctx: Context) = ctx.getSharedPreferences("syntaxcam_widgets", Context.MODE_PRIVATE)
     fun load(ctx: Context, id: Int): WidgetConfig {
         val s = p(ctx); val d = WidgetConfig()
-        return WidgetConfig(
-            s.getInt("$id.theme", d.theme), s.getInt("$id.a", d.colorA), s.getInt("$id.b", d.colorB),
-            s.getFloat("$id.round", d.roundness), s.getBoolean("$id.label", d.showLabel), s.getBoolean("$id.shuffle", d.shuffle)
-        )
+        // older versions stored glass / gradient themes: anything that is not dark becomes white
+        val theme = if (s.getInt("$id.theme", d.theme) == THEME_DARK) THEME_DARK else THEME_LIGHT
+        return WidgetConfig(theme, s.getFloat("$id.round", d.roundness), s.getBoolean("$id.label", d.showLabel), s.getBoolean("$id.shuffle", d.shuffle))
     }
     fun save(ctx: Context, id: Int, c: WidgetConfig) {
-        p(ctx).edit().putInt("$id.theme", c.theme).putInt("$id.a", c.colorA).putInt("$id.b", c.colorB)
-            .putFloat("$id.round", c.roundness).putBoolean("$id.label", c.showLabel).putBoolean("$id.shuffle", c.shuffle).apply()
+        p(ctx).edit().putInt("$id.theme", c.theme).putFloat("$id.round", c.roundness)
+            .putBoolean("$id.label", c.showLabel).putBoolean("$id.shuffle", c.shuffle).apply()
     }
     fun delete(ctx: Context, id: Int) {
         val e = p(ctx).edit()
@@ -49,182 +45,128 @@ object WidgetStore {
     }
 }
 
+/**
+ * Minimal solid widget: one rounded photo on a flat white or near-black card,
+ * with the date in bold italic and a quiet shot count. Corners follow the reference tile.
+ */
 object WidgetRenderer {
     private const val AA = Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG
 
-    class Photo(val bmp: Bitmap?, val dateText: String, val count: Int)
+    class Photo(val bmp: Bitmap?, val date: LocalDate, val count: Int)
 
     fun pickPhoto(ctx: Context, shuffle: Boolean, maxDim: Int = 900): Photo {
         val files = Shots.list(ctx)
-        if (files.isEmpty()) return Photo(null, "", 0)
+        if (files.isEmpty()) return Photo(null, LocalDate.now(), 0)
         val f = if (shuffle) files[Random.nextInt(files.size)] else files.first()
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(f.path, o)
         var s = 1
         while (max(o.outWidth, o.outHeight) / (s * 2) >= maxDim) s *= 2
         val bmp = BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
-        val text = Shots.date(f).format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault()))
-        return Photo(bmp, text, files.size)
+        return Photo(bmp, Shots.date(f), files.size)
     }
 
     fun render(w: Int, h: Int, c: WidgetConfig, photo: Photo): Bitmap {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val cv = Canvas(out)
-        val r = c.roundness * min(w, h)
+        val unit = min(w, h).toFloat()
+        val r = c.roundness * unit
+        val dark = c.theme == THEME_DARK
         val layer = cv.saveLayer(0f, 0f, w.toFloat(), h.toFloat(), null)
-        when (c.theme) {
-            THEME_LIGHT -> solid(cv, w, h, r, c, photo, false)
-            THEME_DARK -> solid(cv, w, h, r, c, photo, true)
-            THEME_GRADIENT -> gradient(cv, w, h, r, c, photo)
-            else -> glass(cv, w, h, r, c, photo)
-        }
-        // anti-aliased rounded-corner mask (the "edge")
+        solid(cv, w, h, r, c, photo, dark)
+        // anti-aliased rounded-corner mask: this is the widget's edge
         cv.drawRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), r, r,
             Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) })
         cv.restoreToCount(layer)
+        // hairline so a white card still reads on a white wallpaper
+        cv.drawRoundRect(RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r, r, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeWidth = max(1f, unit * 0.004f)
+            color = if (dark) 0x16FFFFFF else 0x1A000000
+        })
         return out
     }
 
-    // ---------- themes ----------
-
-    private fun glass(cv: Canvas, w: Int, h: Int, r: Float, c: WidgetConfig, ph: Photo) {
-        val full = RectF(0f, 0f, w.toFloat(), h.toFloat())
-        val bmp = ph.bmp ?: placeholder(w, h)
-        drawCover(cv, bmp, full)
-        // feathered frosted band along the bottom (progressive blur + tint)
-        val bandH = h * (if (c.showLabel) 0.52f else 0.34f)
-        val band = RectF(0f, h - bandH, w.toFloat(), h.toFloat())
-        val l = cv.saveLayer(band, null)
-        drawCover(cv, blur(bmp), full, satPaint(1.5f))
-        cv.drawRect(band, Paint().apply {
-            shader = LinearGradient(0f, band.top, 0f, band.bottom, withAlpha(c.colorA, 40), withAlpha(c.colorA, 120), Shader.TileMode.CLAMP)
-        })
-        cv.drawRect(band, Paint().apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            shader = LinearGradient(0f, band.top, 0f, band.top + bandH * 0.5f, 0x00000000, 0xFF000000.toInt(), Shader.TileMode.CLAMP)
-        })
-        cv.restoreToCount(l)
-        // soft top-left sheen
-        cv.drawRect(full, Paint().apply {
-            shader = RadialGradient(w * 0.2f, h * 0.1f, w * 0.75f, 0x55FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
-        })
-        rim(cv, w, h, r)
-        if (c.showLabel) label(cv, ph, min(w, h) * 0.07f, h - min(w, h) * 0.07f, w - min(w, h) * 0.14f, 0xFFFFFFFF.toInt(), true)
-    }
-
     private fun solid(cv: Canvas, w: Int, h: Int, r: Float, c: WidgetConfig, ph: Photo, dark: Boolean) {
-        val bg = if (dark) 0xFF1C1C1E.toInt() else 0xFFFFFFFF.toInt()
+        val bg = if (dark) 0xFF0E0E10.toInt() else 0xFFFFFFFF.toInt()
         val fg = if (dark) 0xFFFFFFFF.toInt() else 0xFF111111.toInt()
+        val muted = withAlpha(fg, 130)
         cv.drawColor(bg)
-        val unit = min(w, h)
-        val pad = unit * 0.07f
-        val wide = w > h * 1.6f
+
+        val unit = min(w, h).toFloat()
+        val pad = unit * 0.075f
+        val wide = w > h * 1.55f
+        val ts = unit * 0.14f
         val pr = when {
             !c.showLabel -> RectF(pad, pad, w - pad, h - pad)
             wide -> RectF(pad, pad, h - pad, h - pad)
-            else -> RectF(pad, pad, w - pad, h - pad - h * 0.25f)
+            else -> RectF(pad, pad, w - pad, max(h - pad - ts * 1.05f - pad * 0.6f, pad + unit * 0.4f))
         }
-        val ir = max(r - pad * 0.5f, 8f)
-        val bmp = ph.bmp ?: placeholder(pr.width().toInt().coerceAtLeast(2), pr.height().toInt().coerceAtLeast(2))
+        val ir = max(r - pad, unit * 0.05f)          // concentric with the card's corner
+        val bmp = ph.bmp ?: placeholder(pr.width().toInt(), pr.height().toInt(), dark)
         val l = cv.saveLayer(pr, null)
         drawCover(cv, bmp, pr)
         cv.drawRoundRect(pr, ir, ir, Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) })
         cv.restoreToCount(l)
-        cv.drawRoundRect(pr, ir, ir, Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = max(1f, unit * 0.006f); color = withAlpha(fg, 30)
-        })
-        if (c.showLabel) {
-            if (wide) label(cv, ph, pr.right + pad * 1.3f, h - pad, w - pr.right - pad * 2.3f, fg, false)
-            else label(cv, ph, pad, h - pad, w - pad * 2, fg, false)
+
+        if (!c.showLabel) return
+        val locale = Locale.getDefault()
+        val dateStr = ph.date.format(DateTimeFormatter.ofPattern("d MMM", locale))
+        val weekday = ph.date.format(DateTimeFormatter.ofPattern("EEEE", locale)).uppercase(locale)
+        val boldItalic = Typeface.create("sans-serif", Typeface.BOLD_ITALIC)
+        val plain = Typeface.create("sans-serif", Typeface.NORMAL)
+        val countFull = "${ph.count} shot${if (ph.count == 1) "" else "s"}"
+
+        if (wide) {
+            val x0 = pr.right + pad * 1.3f
+            val avail = w - x0 - pad
+            val dp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fg; typeface = boldItalic; textSize = unit * 0.2f }
+            while (dp.measureText(dateStr) > avail && dp.textSize > 10f) dp.textSize *= 0.92f
+            val cs = dp.textSize * 0.34f
+            val cp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = muted; typeface = plain; textSize = cs; letterSpacing = 0.02f }
+            val wp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = muted; typeface = plain; textSize = cs * 0.85f; letterSpacing = 0.14f }
+            val base = h - pad
+            cv.drawText(countFull, x0, base, cp)
+            val by = base - cs * 1.9f
+            cv.drawText(dateStr, x0, by, dp)
+            cv.drawText(weekday, x0, by - dp.textSize * 1.2f, wp)
+        } else {
+            val dp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fg; typeface = boldItalic; textSize = ts }
+            while (dp.measureText(dateStr) > w - 2 * pad && dp.textSize > 10f) dp.textSize *= 0.92f
+            val base = h - pad * 0.95f
+            cv.drawText(dateStr, pad, base, dp)
+            val cp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = muted; typeface = plain; textSize = dp.textSize * 0.55f; textAlign = Paint.Align.RIGHT
+            }
+            val room = w - 2 * pad - dp.measureText(dateStr) - pad * 1.5f
+            val str = if (cp.measureText(countFull) < room) countFull else "${ph.count}"
+            if (cp.measureText(str) < room) cv.drawText(str, w - pad, base, cp)
         }
     }
 
-    private fun gradient(cv: Canvas, w: Int, h: Int, r: Float, c: WidgetConfig, ph: Photo) {
-        val full = RectF(0f, 0f, w.toFloat(), h.toFloat())
-        val bmp = ph.bmp ?: placeholder(w, h)
-        drawCover(cv, bmp, full)
-        // progressive blur: sharp on top, blurred toward the bottom
-        val l = cv.saveLayer(full, null)
-        drawCover(cv, blur(bmp), full, satPaint(1.3f))
-        cv.drawRect(full, Paint().apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            shader = LinearGradient(0f, 0f, 0f, h.toFloat(), intArrayOf(0x00000000, 0x00000000, 0xFF000000.toInt()),
-                floatArrayOf(0f, 0.25f, 0.85f), Shader.TileMode.CLAMP)
-        })
-        cv.restoreToCount(l)
-        // colour wash
-        cv.drawRect(full, Paint().apply {
-            shader = LinearGradient(0f, h.toFloat(), w * 0.7f, 0f,
-                intArrayOf(withAlpha(c.colorB, 235), withAlpha(c.colorA, 150), withAlpha(c.colorA, 0)),
-                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
-        })
-        rim(cv, w, h, r)
-        if (c.showLabel) label(cv, ph, min(w, h) * 0.07f, h - min(w, h) * 0.07f, w - min(w, h) * 0.14f, 0xFFFFFFFF.toInt(), true)
-    }
-
-    // ---------- helpers ----------
-
-    private fun rim(cv: Canvas, w: Int, h: Int, r: Float) {
-        val sw = max(2f, min(w, h) * 0.014f)
-        cv.drawRoundRect(RectF(sw / 2, sw / 2, w - sw / 2, h - sw / 2), r - sw / 2, r - sw / 2, Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = sw
-            shader = LinearGradient(0f, 0f, w.toFloat(), h.toFloat(),
-                intArrayOf(0xCCFFFFFF.toInt(), 0x10FFFFFF, 0x55FFFFFF), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-        })
-    }
-
-    private fun label(cv: Canvas, ph: Photo, left: Float, baseline: Float, maxW: Float, color: Int, shadow: Boolean) {
-        val unit = maxW
-        val title = if (ph.bmp != null) ph.dateText else "SYNTAX CAM"
-        val sub = if (ph.bmp != null) "${ph.count} shot${if (ph.count == 1) "" else "s"}" else "Take your first shot"
-        val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = color; textSize = unit * 0.17f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            if (shadow) setShadowLayer(unit * 0.03f, 0f, unit * 0.008f, 0x66000000)
-        }
-        while (tp.measureText(title) > maxW && tp.textSize > 10f) tp.textSize *= 0.92f
-        val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = withAlpha(color, 205); textSize = tp.textSize * 0.5f
-            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            if (shadow) setShadowLayer(unit * 0.02f, 0f, unit * 0.005f, 0x55000000)
-        }
-        cv.drawText(sub, left, baseline, sp)
-        cv.drawText(title, left, baseline - sp.textSize * 1.4f, tp)
-    }
-
-    private fun drawCover(cv: Canvas, bmp: Bitmap, dst: RectF, paint: Paint = Paint(AA)) {
+    private fun drawCover(cv: Canvas, bmp: Bitmap, dst: RectF) {
         val sw = bmp.width.toFloat(); val sh = bmp.height.toFloat()
         val scale = max(dst.width() / sw, dst.height() / sh)
         val cw = dst.width() / scale; val ch = dst.height() / scale
         val sx = (sw - cw) / 2f; val sy = (sh - ch) / 2f
-        cv.drawBitmap(bmp, Rect(sx.toInt(), sy.toInt(), (sx + cw).toInt().coerceAtMost(bmp.width), (sy + ch).toInt().coerceAtMost(bmp.height)), dst, paint)
+        cv.drawBitmap(bmp, Rect(sx.toInt(), sy.toInt(), (sx + cw).toInt().coerceAtMost(bmp.width), (sy + ch).toInt().coerceAtMost(bmp.height)), dst, Paint(AA))
     }
 
-    private fun blur(src: Bitmap): Bitmap {
-        var b = Bitmap.createScaledBitmap(src, max(src.width / 20, 8), max(src.height / 20, 8), true)
-        b = Bitmap.createScaledBitmap(b, max(src.width / 5, 16), max(src.height / 5, 16), true)
-        return b
-    }
-
-    private fun satPaint(s: Float) = Paint(AA).apply { colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(s) }) }
     private fun withAlpha(color: Int, a: Int) = (color and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
 
-    /** Astral placeholder when there are no photos yet: dark sky, stars, the four-point star. */
-    private fun placeholder(w: Int, h: Int): Bitmap {
-        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    /** No photos yet: a flat tile with a thin outlined four-point star. */
+    private fun placeholder(w: Int, h: Int, dark: Boolean): Bitmap {
+        val b = Bitmap.createBitmap(max(w, 2), max(h, 2), Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), Paint().apply {
-            shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0xFF05030F.toInt(), 0xFF22104A.toInt(), Shader.TileMode.CLAMP)
-        })
-        val rnd = Random(5)
-        val sp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-        repeat(40) { sp.alpha = 60 + rnd.nextInt(160); c.drawCircle(rnd.nextFloat() * w, rnd.nextFloat() * h, 1f + rnd.nextFloat() * 1.5f, sp) }
-        val cx = w / 2f; val cy = h * 0.42f; val rr = min(w, h) * 0.22f
+        c.drawColor(if (dark) 0xFF1E1E21.toInt() else 0xFFF0F0F2.toInt())
+        val cx = b.width / 2f; val cy = b.height / 2f; val rr = min(b.width, b.height) * 0.14f
         val star = Path().apply {
             moveTo(cx, cy - rr); quadTo(cx, cy, cx + rr, cy); quadTo(cx, cy, cx, cy + rr)
             quadTo(cx, cy, cx - rr, cy); quadTo(cx, cy, cx, cy - rr); close()
         }
-        c.drawPath(star, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE })
+        c.drawPath(star, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeWidth = max(2f, rr * 0.12f); strokeJoin = Paint.Join.ROUND
+            color = withAlpha(if (dark) Color.WHITE else Color.BLACK, 80)
+        })
         return b
     }
 }
