@@ -74,7 +74,7 @@ fun GalleryScreen(onClose: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(Color(0xFF09090D))) {
         Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 12.dp)
+            Modifier.fillMaxSize().displayCutoutPadding().statusBarsPadding().navigationBarsPadding().padding(horizontal = 12.dp)
                 .pointerInput(month) {
                     var dx = 0f
                     detectHorizontalDragGestures(
@@ -161,7 +161,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                 HorizontalPager(pager, Modifier.fillMaxSize()) { i ->
                     Thumb(list[i], Modifier.fillMaxSize(), ContentScale.Fit, 2000)
                 }
-                Row(Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)) {
+                Row(Modifier.fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(12.dp)) {
                     Pill("✕") { haptics.select(); open = null }
                     Spacer(Modifier.weight(1f))
                     Pill("🗑") {

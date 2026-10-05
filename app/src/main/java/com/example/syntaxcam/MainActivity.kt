@@ -29,6 +29,27 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import android.view.WindowManager
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -60,8 +81,25 @@ private class Params {
 }
 
 class MainActivity : ComponentActivity() {
+    private fun goFullScreen() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) goFullScreen()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        goFullScreen()
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 var welcome by remember { mutableStateOf(true) }
@@ -76,6 +114,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     val ctx = LocalContext.current
@@ -291,69 +330,141 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // ---- fluid filter state ----
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val effectList = remember { Effect.values().toList() }
+    val screenW = LocalConfiguration.current.screenWidthDp
+    var prevFrame by remember { mutableStateOf<Bitmap?>(null) }
+    val fade = remember { Animatable(1f) }
+    var lastPinch by remember { mutableLongStateOf(0L) }
+    var userDrag by remember { mutableStateOf(false) }
+
+    // cross-fade (with a soft zoom-settle) whenever the filter selection changes
+    LaunchedEffect(selected) {
+        prevFrame = frame
+        fade.snapTo(0f)
+        fade.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+        prevFrame = null
+    }
+    // dragging the carousel picks the filter that settles in the centre
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) userDrag = true }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling && userDrag) {
+                userDrag = false
+                val li = listState.layoutInfo
+                val vc = (li.viewportStartOffset + li.viewportEndOffset) / 2
+                val idx = li.visibleItemsInfo.minByOrNull { kotlin.math.abs(it.offset + it.size / 2 - vc) }?.index
+                if (idx != null && selected != listOf(effectList[idx])) { selected = listOf(effectList[idx]); haptics.tick() }
+            }
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        // ===== full-screen live preview: pinch = zoom, tap = focus, swipe = previous/next filter =====
+        Box(
+            Modifier.fillMaxSize()
+                .pointerInput(cam, picked) {
+                    detectTransformGestures { _, _, z, _ ->
+                        val c = cam ?: return@detectTransformGestures
+                        if (picked != null) return@detectTransformGestures
+                        if (kotlin.math.abs(z - 1f) > 0.004f) lastPinch = System.currentTimeMillis()
+                        val zs = c.cameraInfo.zoomState.value ?: return@detectTransformGestures
+                        zoomMin = zs.minZoomRatio; zoomMax = zs.maxZoomRatio
+                        val nz = (zoom * z).coerceIn(zs.minZoomRatio, zs.maxZoomRatio)
+                        if (nz.toInt() != zoom.toInt()) haptics.tick()
+                        zoom = nz
+                        c.cameraControl.setZoomRatio(nz)
+                    }
+                }
+                .pointerInput(cam, picked) {
+                    detectTapGestures { off ->
+                        val c = cam ?: return@detectTapGestures
+                        if (picked != null) return@detectTapGestures
+                        focusPt = off
+                        haptics.tick()
+                        val pt = SurfaceOrientedMeteringPointFactory(size.width.toFloat(), size.height.toFloat())
+                            .createPoint(off.x, off.y)
+                        runCatching { c.cameraControl.startFocusAndMetering(FocusMeteringAction.Builder(pt).build()) }
+                    }
+                }
+                .pointerInput(Unit) {
+                    var dx = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { dx = 0f },
+                        onDragEnd = {
+                            if (System.currentTimeMillis() - lastPinch > 400 && kotlin.math.abs(dx) > 120f) {
+                                val cur = effectList.indexOf(selected.lastOrNull() ?: Effect.TIME)
+                                val n = effectList.size
+                                val next = if (dx < 0) (cur + 1) % n else (cur - 1 + n) % n
+                                selected = listOf(effectList[next]); haptics.tick()
+                                scope.launch { listState.animateScrollToItem(next) }
+                            }
+                        },
+                        onHorizontalDrag = { _, d -> dx += d }
+                    )
+                }
+        ) {
+            frame?.let { f ->
+                Image(f.asImageBitmap(), null,
+                    Modifier.fillMaxSize().graphicsLayer { val k = 1.05f - 0.05f * fade.value; scaleX = k; scaleY = k },
+                    contentScale = ContentScale.Crop)
+            }
+            prevFrame?.let { pf ->
+                Image(pf.asImageBitmap(), null,
+                    Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value },
+                    contentScale = ContentScale.Crop)
+            }
+            if (grid) Canvas(Modifier.fillMaxSize()) {
+                val c = Color(0x88FFFFFF)
+                for (i in 1..2) {
+                    drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), 2f)
+                    drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
+                }
+            }
+            focusPt?.let { p -> Canvas(Modifier.fillMaxSize()) { drawCircle(Color.White, 34.dp.toPx(), p, style = Stroke(3f)) } }
+            if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
+        }
+
+        // soft scrims so overlay controls stay readable on any scene
+        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(150.dp)
+            .background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(380.dp)
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))))
+
+        // ===== top bar =====
+        Row(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (picked != null) RoundBtn("✕") { haptics.select(); picked = null } else Spacer(Modifier.size(52.dp))
+            Spacer(Modifier.weight(1f))
+            if (rawActive && picked == null) Text(
+                "RAW", Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0x99000000)).padding(horizontal = 10.dp, vertical = 4.dp),
+                color = Color(0xFFFFD23F), fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            RoundBtn("🗓") { haptics.select(); onOpenGallery() }
+            Spacer(Modifier.width(10.dp))
+            RoundBtn("⚙") { haptics.select(); showSettings = true }
+        }
+
+        // ===== bottom controls (float over the preview) =====
         Column(
-            Modifier.fillMaxSize().background(Color.Black).statusBarsPadding().navigationBarsPadding().padding(12.dp),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Preview: pinch to zoom, tap to focus
-            Box(
-                Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Color(0xFF0E0E0E))
-                    .pointerInput(cam, picked) {
-                        detectTransformGestures { _, _, z, _ ->
-                            val c = cam ?: return@detectTransformGestures
-                            if (picked != null) return@detectTransformGestures
-                            val zs = c.cameraInfo.zoomState.value ?: return@detectTransformGestures
-                            zoomMin = zs.minZoomRatio; zoomMax = zs.maxZoomRatio
-                            val nz = (zoom * z).coerceIn(zs.minZoomRatio, zs.maxZoomRatio)
-                            if (nz.toInt() != zoom.toInt()) haptics.tick()
-                            zoom = nz
-                            c.cameraControl.setZoomRatio(nz)
-                        }
-                    }
-                    .pointerInput(cam, picked) {
-                        detectTapGestures { off ->
-                            val c = cam ?: return@detectTapGestures
-                            if (picked != null) return@detectTapGestures
-                            focusPt = off
-                            haptics.tick()
-                            val pt = SurfaceOrientedMeteringPointFactory(size.width.toFloat(), size.height.toFloat())
-                                .createPoint(off.x, off.y)
-                            runCatching { c.cameraControl.startFocusAndMetering(FocusMeteringAction.Builder(pt).build()) }
-                        }
-                    }
-            ) {
-                frame?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
-                if (grid) Canvas(Modifier.fillMaxSize()) {
-                    val c = Color(0x88FFFFFF)
-                    for (i in 1..2) {
-                        drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), 2f)
-                        drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
-                    }
-                }
-                focusPt?.let { p -> Canvas(Modifier.fillMaxSize()) { drawCircle(Color.White, 34.dp.toPx(), p, style = Stroke(3f)) } }
-                if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
-
-                if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp)) { haptics.select(); picked = null }
-                if (rawActive && picked == null) Text(
-                    "RAW", Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xCC1C1C1C)).padding(horizontal = 10.dp, vertical = 4.dp),
-                    color = Color(0xFFFFD23F), fontSize = 12.sp)
-                Column(Modifier.align(Alignment.TopEnd).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    RoundBtn("🗓") { haptics.select(); onOpenGallery() }
-                    RoundBtn("⚙") { haptics.select(); showSettings = true }
-                }
-
-                // zoom presets + readout
-                if (picked == null && zoomMax > zoomMin + 0.01f) Row(
-                    Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xAA000000)).padding(4.dp),
+            if (picked == null && zoomMax > zoomMin + 0.01f) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(20.dp)).background(Color(0x99000000)).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
                     listOf(0.5f, 1f, 2f, 5f).filter { it >= zoomMin - 0.01f && it <= zoomMax + 0.01f }.forEach { p ->
                         val on = kotlin.math.abs(zoom - p) < 0.15f
                         Box(
-                            Modifier.clip(CircleShape).background(if (on) Color(0xFF2F3340) else Color.Transparent)
+                            Modifier.clip(CircleShape).background(if (on) Color(0x55FFFFFF) else Color.Transparent)
                                 .clickable {
                                     haptics.tick(); zoom = p
                                     cam?.cameraControl?.setZoomRatio(p)
@@ -361,18 +472,41 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                             contentAlignment = Alignment.Center
                         ) { Text(if (p < 1f) ".5" else "${p.toInt()}×", fontSize = 13.sp, color = if (on) Color(0xFFFFD23F) else Color.White) }
                     }
-                    Text(String.format("%.1f×", zoom), Modifier.padding(horizontal = 8.dp), fontSize = 11.sp, color = Color(0xFFAAAAB5))
+                    Text(String.format("%.1f×", zoom), Modifier.padding(horizontal = 8.dp), fontSize = 11.sp, color = Color(0xFFCCCCD5))
                 }
+                Spacer(Modifier.height(10.dp))
             }
-            Spacer(Modifier.height(14.dp))
 
-            // Effect carousel: tap to add/remove; number = order applied
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                items(Effect.values().toList()) { e ->
+            // filter carousel: snaps to centre, scales/fades with distance; dragging it selects the centred filter, tapping stacks
+            LazyRow(
+                state = listState,
+                flingBehavior = rememberSnapFlingBehavior(listState),
+                contentPadding = PaddingValues(horizontal = ((screenW - 78) / 2).coerceAtLeast(0).dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                itemsIndexed(effectList) { i, e ->
                     val idx = selected.indexOf(e)
                     val sel = idx >= 0
-                    Column(horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.clickable { haptics.tick(); selected = if (sel) selected - e else selected + e }) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .graphicsLayer {
+                                val li = listState.layoutInfo
+                                val info = li.visibleItemsInfo.firstOrNull { x -> x.index == i }
+                                if (info != null) {
+                                    val vc = (li.viewportStartOffset + li.viewportEndOffset) / 2f
+                                    val half = ((li.viewportEndOffset - li.viewportStartOffset).coerceAtLeast(1)) / 2f
+                                    val d = (kotlin.math.abs(vc - (info.offset + info.size / 2f)) / half).coerceIn(0f, 1f)
+                                    val k = 1f - 0.24f * d
+                                    scaleX = k; scaleY = k; alpha = 1f - 0.5f * d
+                                }
+                            }
+                            .clickable {
+                                haptics.tick()
+                                selected = if (sel) selected - e else selected + e
+                                scope.launch { listState.animateScrollToItem(i) }
+                            }
+                    ) {
                         Box(Modifier.size(78.dp)) {
                             Box(
                                 Modifier.fillMaxSize().clip(CircleShape)
@@ -388,39 +522,39 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                             ) { Text("${idx + 1}", fontSize = 11.sp, color = Color.White) }
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text(e.label, fontSize = 11.sp, color = if (sel) Color.White else Color.Gray)
+                        Text(e.label, fontSize = 11.sp, color = if (sel) Color.White else Color(0xFFB8B8C2))
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(12.dp))
 
             // MIN—MAX slider + shuffle
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
-                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0xFF1C1C1C)).padding(horizontal = 14.dp),
+                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0x73000000)).padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("MIN", fontSize = 10.sp, color = Color.Gray)
+                    Text("MIN", fontSize = 10.sp, color = Color(0xFFB8B8C2))
                     Slider(amount, { v -> if ((v * 10).toInt() != (amount * 10).toInt()) haptics.tick(); amount = v },
                         Modifier.weight(1f).padding(horizontal = 6.dp),
-                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.DarkGray))
-                    Text("MAX", fontSize = 10.sp, color = Color.Gray)
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color(0x66FFFFFF)))
+                    Text("MAX", fontSize = 10.sp, color = Color(0xFFB8B8C2))
                 }
                 RoundBtn("🎲") { haptics.heavy(); seed = System.nanoTime() }
             }
             Spacer(Modifier.height(14.dp))
 
-            // grid | import | shutter | flip | flash
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            // grid | import (+) | shutter | flip | flashlight
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 RoundBtn("#", active = grid) { grid = !grid; haptics.toggle(grid) }
-                RoundBtn("🖼") { haptics.select(); galleryLauncher.launch("image/*") }
+                IconBtn(onClick = { haptics.select(); galleryLauncher.launch("image/*") }) { ImportIcon() }
                 Box(
                     Modifier.size(72.dp).clip(CircleShape).border(4.dp, if (busy) Color.Gray else Color.White, CircleShape).padding(7.dp)
                         .clip(CircleShape).background(if (busy) Color.Gray else Color.White)
                         .clickable { shoot() }
                 )
                 RoundBtn("⟲") { haptics.select(); picked = null; front = !front }
-                RoundBtn("💡", active = torch) { torch = !torch; haptics.toggle(torch) }
+                IconBtn(active = torch, onClick = { torch = !torch; haptics.toggle(torch) }) { FlashlightIcon(torch) }
             }
         }
 
@@ -507,10 +641,58 @@ private fun Seg(options: List<String>, selected: Int, enabled: List<Boolean>, on
 }
 
 @Composable
+private fun IconBtn(active: Boolean = false, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+    Box(
+        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0x44FFFFFF) else Color(0x73000000)).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center, content = content
+    )
+}
+
+/** Flashlight: white outline only. Light rays appear when it is on. */
+@Composable
+private fun FlashlightIcon(on: Boolean) {
+    Canvas(Modifier.size(26.dp)) {
+        val s = size.width / 24f
+        val st = Stroke(width = 1.8f * s, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val c = Color.White
+        val head = Path().apply {
+            moveTo(7f * s, 6f * s); lineTo(17f * s, 6f * s); lineTo(15f * s, 10f * s); lineTo(9f * s, 10f * s); close()
+        }
+        drawPath(head, c, style = st)
+        drawRoundRect(c, Offset(9f * s, 10f * s), Size(6f * s, 12f * s), CornerRadius(2f * s), style = st)
+        drawLine(c, Offset(12f * s, 13f * s), Offset(12f * s, 16f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+        if (on) {
+            drawLine(c, Offset(12f * s, 1.2f * s), Offset(12f * s, 3.2f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+            drawLine(c, Offset(5.6f * s, 2.8f * s), Offset(7.2f * s, 4.3f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+            drawLine(c, Offset(18.4f * s, 2.8f * s), Offset(16.8f * s, 4.3f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+        }
+    }
+}
+
+/** Import: picture outline with a + badge. */
+@Composable
+private fun ImportIcon() {
+    Canvas(Modifier.size(26.dp)) {
+        val s = size.width / 24f
+        val st = Stroke(width = 1.8f * s, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val c = Color.White
+        drawRoundRect(c, Offset(2.5f * s, 3.5f * s), Size(15f * s, 13f * s), CornerRadius(2.5f * s), style = st)
+        val m = Path().apply {
+            moveTo(2.5f * s, 13.5f * s); lineTo(7f * s, 9f * s); lineTo(10.5f * s, 12.5f * s)
+            lineTo(13f * s, 10.5f * s); lineTo(17.5f * s, 14.5f * s)
+        }
+        drawPath(m, c, style = st)
+        drawCircle(c, 1.3f * s, Offset(12.8f * s, 7f * s), style = st)
+        drawLine(c, Offset(19.5f * s, 16.5f * s), Offset(19.5f * s, 22.5f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+        drawLine(c, Offset(16.5f * s, 19.5f * s), Offset(22.5f * s, 19.5f * s), strokeWidth = 1.8f * s, cap = StrokeCap.Round)
+    }
+}
+
+@Composable
 private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, onClick: () -> Unit) {
     Box(
         modifier.size(52.dp).clip(CircleShape)
-            .background(if (active) Color(0xFF2F7BFF) else Color(0xCC1C1C1C)).clickable(onClick = onClick),
+            .background(if (active) Color(0xFF2F7BFF) else Color(0x73000000)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, fontSize = 20.sp, color = Color.White) }
 }
