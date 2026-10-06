@@ -44,14 +44,12 @@ class WidgetConfigActivity : ComponentActivity() {
 private fun ConfigScreen(id: Int, onAdd: (WidgetConfig) -> Unit) {
     val ctx = LocalContext.current
     val saved = remember { WidgetStore.load(ctx, id) }
-    var theme by remember { mutableIntStateOf(saved.theme) }
-    var round by remember { mutableFloatStateOf(saved.roundness) }
-    var label by remember { mutableStateOf(saved.showLabel) }
+    var showDate by remember { mutableStateOf(saved.showDate) }
     var shuffle by remember { mutableStateOf(saved.shuffle) }
-    val size = remember { SyntaxWidgetProvider.sizePx(ctx, AppWidgetManager.getInstance(ctx), id, 520) }
+    val m = remember { SyntaxWidgetProvider.metrics(ctx, AppWidgetManager.getInstance(ctx), id, 520) }
     val photo = remember { WidgetRenderer.pickPhoto(ctx, false, 700) }
-    val preview = remember(theme, round, label) {
-        WidgetRenderer.render(size.first, size.second, WidgetConfig(theme, round, label, shuffle), photo).asImageBitmap()
+    val preview = remember(showDate) {
+        WidgetRenderer.render(m.w, m.h, WidgetConfig(showDate, shuffle), photo, CORNER_DP * m.pxPerDp).asImageBitmap()
     }
 
     Column(
@@ -61,28 +59,18 @@ private fun ConfigScreen(id: Int, onAdd: (WidgetConfig) -> Unit) {
     ) {
         Text("Widget", color = Color.White, fontSize = 26.sp)
         Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(Color(0xFF15151B)).padding(22.dp), contentAlignment = Alignment.Center) {
-            Image(preview, null, Modifier.fillMaxWidth(0.8f).aspectRatio(size.first / size.second.toFloat()), contentScale = ContentScale.Fit)
+            Image(preview, null, Modifier.fillMaxWidth(0.6f).aspectRatio(m.w / m.h.toFloat()), contentScale = ContentScale.Fit)
         }
-
-        Cap("STYLE")
-        TwoWay("White", "Dark", theme == THEME_DARK) { theme = if (it) THEME_DARK else THEME_LIGHT }
-
-        Cap("CORNERS")
-        Slider(round, { round = it }, valueRange = 0.06f..0.32f,
-            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color(0x44FFFFFF)))
-        Text("Default follows your reference tile.", color = Color(0xFF7C7C88), fontSize = 12.sp)
-
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Cap("DATE + COUNT"); Spacer(Modifier.weight(1f)); Switch(label, { label = it })
+            Cap("SHOW DATE"); Spacer(Modifier.weight(1f)); Switch(showDate, { showDate = it })
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Cap("SHUFFLE PHOTOS"); Spacer(Modifier.weight(1f)); Switch(shuffle, { shuffle = it })
         }
-        Text("Resize the widget on your home screen to change its size.", color = Color(0xFF7C7C88), fontSize = 12.sp)
-
+        Text("2×2 photo widget with 28dp rounded corners.", color = Color(0xFF7C7C88), fontSize = 12.sp)
         Box(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color.White)
-                .clickable { onAdd(WidgetConfig(theme, round, label, shuffle)) }.padding(vertical = 16.dp),
+                .clickable { onAdd(WidgetConfig(showDate, shuffle)) }.padding(vertical = 16.dp),
             contentAlignment = Alignment.Center
         ) { Text("Add widget", color = Color.Black, fontSize = 16.sp) }
     }
@@ -90,17 +78,3 @@ private fun ConfigScreen(id: Int, onAdd: (WidgetConfig) -> Unit) {
 
 @Composable
 private fun Cap(t: String) = Text(t, color = Color(0xFF8A8A96), fontSize = 11.sp, letterSpacing = 1.5.sp)
-
-@Composable
-private fun TwoWay(a: String, b: String, second: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF1C1C24)).padding(3.dp)) {
-        listOf(a to false, b to true).forEach { (label, isSecond) ->
-            val on = second == isSecond
-            Box(
-                Modifier.weight(1f).clip(RoundedCornerShape(11.dp)).background(if (on) Color(0xFF2F3340) else Color.Transparent)
-                    .clickable { onChange(isSecond) }.padding(vertical = 11.dp),
-                contentAlignment = Alignment.Center
-            ) { Text(label, fontSize = 14.sp, color = if (on) Color.White else Color(0xFF9A9AA6)) }
-        }
-    }
-}

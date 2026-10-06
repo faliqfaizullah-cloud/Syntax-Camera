@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.syntaxcam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 12
-        versionName = "2.1.0"
+        versionCode = 14
+        versionName = "2.3.0"
     }
 
     buildTypes {

@@ -363,10 +363,15 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         }
     }
 
+    val overlayBg = Color(0xB31C1C1C)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // ===== full-screen live preview: pinch = zoom, tap = focus, swipe = previous/next filter =====
-        Box(
-            Modifier.fillMaxSize()
+        Column(
+            Modifier.fillMaxSize().displayCutoutPadding().statusBarsPadding().navigationBarsPadding().padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // ===== rounded preview card: pinch = zoom, tap = focus, swipe = previous/next filter =====
+            Box(
+                Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Color(0xFF0E0E0E))
                 .pointerInput(cam, picked) {
                     detectTransformGestures { _, _, z, _ ->
                         val c = cam ?: return@detectTransformGestures
@@ -407,64 +412,47 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                         onHorizontalDrag = { _, d -> dx += d }
                     )
                 }
-        ) {
-            frame?.let { f ->
-                Image(f.asImageBitmap(), null,
-                    Modifier.fillMaxSize().graphicsLayer { val k = 1.05f - 0.05f * fade.value; scaleX = k; scaleY = k },
-                    contentScale = ContentScale.Crop)
-            }
-            prevFrame?.let { pf ->
-                Image(pf.asImageBitmap(), null,
-                    Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value },
-                    contentScale = ContentScale.Crop)
-            }
-            if (grid) Canvas(Modifier.fillMaxSize()) {
-                val c = Color(0x88FFFFFF)
-                for (i in 1..2) {
-                    drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), 2f)
-                    drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
+            ) {
+                frame?.let { f ->
+                    Image(f.asImageBitmap(), null,
+                        Modifier.fillMaxSize().graphicsLayer { val k = 1.05f - 0.05f * fade.value; scaleX = k; scaleY = k },
+                        contentScale = ContentScale.Crop)
                 }
-            }
-            focusPt?.let { p -> Canvas(Modifier.fillMaxSize()) { drawCircle(Color.White, 34.dp.toPx(), p, style = Stroke(3f)) } }
-            if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
-        }
+                prevFrame?.let { pf ->
+                    Image(pf.asImageBitmap(), null,
+                        Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value },
+                        contentScale = ContentScale.Crop)
+                }
+                if (grid) Canvas(Modifier.fillMaxSize()) {
+                    val c = Color(0x88FFFFFF)
+                    for (i in 1..2) {
+                        drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), 2f)
+                        drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), 2f)
+                    }
+                }
+                focusPt?.let { p -> Canvas(Modifier.fillMaxSize()) { drawCircle(Color.White, 34.dp.toPx(), p, style = Stroke(3f)) } }
+                if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
 
-        // soft scrims so overlay controls stay readable on any scene
-        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(150.dp)
-            .background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(380.dp)
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))))
+                if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp), bg = overlayBg) { haptics.select(); picked = null }
+                if (rawActive && picked == null) Text(
+                    "RAW", Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(10.dp))
+                        .background(overlayBg).padding(horizontal = 10.dp, vertical = 4.dp),
+                    color = Color(0xFFFFD23F), fontSize = 12.sp)
+                Row(Modifier.align(Alignment.TopEnd).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    RoundBtn("🗓", bg = overlayBg) { haptics.select(); onOpenGallery() }
+                    RoundBtn("⚙", bg = overlayBg) { haptics.select(); showSettings = true }
+                }
 
-        // ===== top bar =====
-        Row(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().displayCutoutPadding().statusBarsPadding().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (picked != null) RoundBtn("✕") { haptics.select(); picked = null } else Spacer(Modifier.size(52.dp))
-            Spacer(Modifier.weight(1f))
-            if (rawActive && picked == null) Text(
-                "RAW", Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0x99000000)).padding(horizontal = 10.dp, vertical = 4.dp),
-                color = Color(0xFFFFD23F), fontSize = 12.sp)
-            Spacer(Modifier.weight(1f))
-            RoundBtn("🗓") { haptics.select(); onOpenGallery() }
-            Spacer(Modifier.width(10.dp))
-            RoundBtn("⚙") { haptics.select(); showSettings = true }
-        }
-
-        // ===== bottom controls (float over the preview) =====
-        Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            if (picked == null && zoomMax > zoomMin + 0.01f) {
-                Row(
-                    Modifier.clip(RoundedCornerShape(20.dp)).background(Color(0x99000000)).padding(4.dp),
+                // zoom presets + readout
+                if (picked == null && zoomMax > zoomMin + 0.01f) Row(
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xAA000000)).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
                     listOf(0.5f, 1f, 2f, 5f).filter { it >= zoomMin - 0.01f && it <= zoomMax + 0.01f }.forEach { p ->
                         val on = kotlin.math.abs(zoom - p) < 0.15f
                         Box(
-                            Modifier.clip(CircleShape).background(if (on) Color(0x55FFFFFF) else Color.Transparent)
+                            Modifier.clip(CircleShape).background(if (on) Color(0xFF2F3340) else Color.Transparent)
                                 .clickable {
                                     haptics.tick(); zoom = p
                                     cam?.cameraControl?.setZoomRatio(p)
@@ -472,12 +460,12 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                             contentAlignment = Alignment.Center
                         ) { Text(if (p < 1f) ".5" else "${p.toInt()}×", fontSize = 13.sp, color = if (on) Color(0xFFFFD23F) else Color.White) }
                     }
-                    Text(String.format("%.1f×", zoom), Modifier.padding(horizontal = 8.dp), fontSize = 11.sp, color = Color(0xFFCCCCD5))
+                    Text(String.format("%.1f×", zoom), Modifier.padding(horizontal = 8.dp), fontSize = 11.sp, color = Color(0xFFAAAAB5))
                 }
-                Spacer(Modifier.height(10.dp))
             }
+            Spacer(Modifier.height(14.dp))
 
-            // filter carousel: snaps to centre, scales/fades with distance; dragging it selects the centred filter, tapping stacks
+            // filter carousel (circles + labels)
             LazyRow(
                 state = listState,
                 flingBehavior = rememberSnapFlingBehavior(listState),
@@ -526,26 +514,26 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
 
-            // MIN—MAX slider + shuffle
-            Row(Modifier.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            // MIN—MAX slider pill + shuffle
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
-                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0x73000000)).padding(horizontal = 14.dp),
+                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0xFF1C1C1C)).padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("MIN", fontSize = 10.sp, color = Color(0xFFB8B8C2))
+                    Text("MIN", fontSize = 10.sp, color = Color.Gray)
                     Slider(amount, { v -> if ((v * 10).toInt() != (amount * 10).toInt()) haptics.tick(); amount = v },
                         Modifier.weight(1f).padding(horizontal = 6.dp),
-                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color(0x66FFFFFF)))
-                    Text("MAX", fontSize = 10.sp, color = Color(0xFFB8B8C2))
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.DarkGray))
+                    Text("MAX", fontSize = 10.sp, color = Color.Gray)
                 }
                 RoundBtn("🎲") { haptics.heavy(); seed = System.nanoTime() }
             }
             Spacer(Modifier.height(14.dp))
 
             // grid | import (+) | shutter | flip | flashlight
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 RoundBtn("#", active = grid) { grid = !grid; haptics.toggle(grid) }
                 IconBtn(onClick = { haptics.select(); galleryLauncher.launch("image/*") }) { ImportIcon() }
                 Box(
@@ -641,9 +629,9 @@ private fun Seg(options: List<String>, selected: Int, enabled: List<Boolean>, on
 }
 
 @Composable
-private fun IconBtn(active: Boolean = false, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+private fun IconBtn(active: Boolean = false, bg: Color = Color(0xFF1C1C1C), onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
     Box(
-        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0x44FFFFFF) else Color(0x73000000)).clickable(onClick = onClick),
+        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0xFF3A3A42) else bg).clickable(onClick = onClick),
         contentAlignment = Alignment.Center, content = content
     )
 }
@@ -689,10 +677,10 @@ private fun ImportIcon() {
 }
 
 @Composable
-private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, onClick: () -> Unit) {
+private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, bg: Color = Color(0xFF1C1C1C), onClick: () -> Unit) {
     Box(
         modifier.size(52.dp).clip(CircleShape)
-            .background(if (active) Color(0xFF2F7BFF) else Color(0x73000000)).clickable(onClick = onClick),
+            .background(if (active) Color(0xFF2F7BFF) else bg).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, fontSize = 20.sp, color = Color.White) }
 }
