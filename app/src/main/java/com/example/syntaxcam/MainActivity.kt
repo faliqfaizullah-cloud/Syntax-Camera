@@ -40,6 +40,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -78,6 +79,7 @@ private class Params {
     @Volatile var amount = 0.5f
     @Volatile var seed = 1L
     @Volatile var picked: Bitmap? = null
+    @Volatile var recorder: VideoRecorder? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -168,6 +170,36 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val ioExecutor = remember { Executors.newSingleThreadExecutor() }
 
+    // ---- frosted backdrop + video recording (long-press the shutter to start, tap it to stop) ----
+    var bgBlur by remember { mutableStateOf<Bitmap?>(null) }
+    var recording by remember { mutableStateOf(false) }
+    var recSec by remember { mutableIntStateOf(0) }
+    var recorder by remember { mutableStateOf<VideoRecorder?>(null) }
+    var pendingVideo by remember { mutableStateOf(false) }
+    var audioOk by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+    }
+    LaunchedEffect(recording) { if (recording) { recSec = 0; while (true) { delay(1000); recSec++ } } }
+    fun beginRecording(withAudio: Boolean) {
+        val f = frame
+        if (f == null) { toast(activity, "Camera not ready"); return }
+        val r = VideoRecorder(ctx.cacheDir, withAudio)
+        if (!r.start(f.width, f.height)) { toast(activity, "Couldn't start video on this phone"); return }
+        if (!withAudio) toast(activity, "Recording without sound")
+        params.recorder = r; recorder = r; recording = true
+        haptics.heavy()
+    }
+    val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        audioOk = ok
+        if (pendingVideo) { pendingVideo = false; beginRecording(ok) }
+    }
+    val startVideo: () -> Unit = {
+        if (audioOk) beginRecording(true) else { pendingVideo = true; audioLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+    }
+    DisposableEffect(Unit) {
+        onDispose { recorder?.let { r -> params.recorder = null; ioExecutor.execute { r.stop() } } }
+    }
+
     // Gallery import
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) runCatching {
@@ -180,6 +212,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     LaunchedEffect(picked, selected, amount, seed) {
         val p = picked ?: return@LaunchedEffect
         frame = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { Effects.applyAll(p, selected, amount, seed) }
+        frame?.let { bgBlur = Effects.blurBackdrop(it) }
     }
     LaunchedEffect(torch, cam) { runCatching { cam?.cameraControl?.enableTorch(torch) } }
     LaunchedEffect(focusPt) { if (focusPt != null) { delay(900); focusPt = null } }
@@ -190,6 +223,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         if (!granted) return@DisposableEffect onDispose {}
         val future = ProcessCameraProvider.getInstance(ctx)
         var counter = 0
+        var bgTick = 0
         future.addListener({
             runCatching {
                 val provider = future.get()
@@ -210,7 +244,10 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                         val upright = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                         proxy.close()
                         val small = Bitmap.createScaledBitmap(upright, 540, (upright.height * 540f / upright.width).toInt(), true)
-                        frame = Effects.applyAll(small, params.effects, params.amount, params.seed)
+                        val pf = Effects.applyAll(small, params.effects, params.amount, params.seed)
+                        frame = pf
+                        params.recorder?.addFrame(pf)
+                        if ((bgTick++ and 1) == 0) bgBlur = Effects.blurBackdrop(pf)
                         if (counter++ % 10 == 0) {
                             val tiny = Bitmap.createScaledBitmap(small, 120, (small.height * 120f / small.width).toInt(), true)
                             thumbs = Effect.values().associateWith { Effects.apply(tiny, it, 0.5f, 7L) }
@@ -363,8 +400,27 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         }
     }
 
-    val overlayBg = Color(0xB31C1C1C)
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    val stopVideo: () -> Unit = {
+        val r = recorder
+        if (r != null) {
+            params.recorder = null; recorder = null; recording = false
+            val last = frame; val secs = recSec
+            haptics.confirm()
+            ioExecutor.execute {
+                val file = r.stop()
+                if (file != null && saveVideo(activity, file)) {
+                    val rv = last?.let { makeReveal(it, "Video · ${fmtTime(secs)}") }
+                    activity.runOnUiThread { if (rv != null) onReveal(rv) else toast(activity, "Video saved") }
+                } else toast(activity, "Video wasn't saved")
+            }
+        }
+    }
+
+    val overlayBg = Color(0xCC2A2A2A)
+    Box(Modifier.fillMaxSize().background(Color(0xFF111111))) {
+        // dark frosted-glass backdrop: the live frame, heavily blurred and tinted dark
+        bgBlur?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop, filterQuality = FilterQuality.High) }
+        Box(Modifier.fillMaxSize().background(Color(0x99000000)))
         Column(
             Modifier.fillMaxSize().displayCutoutPadding().statusBarsPadding().navigationBarsPadding().padding(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -432,9 +488,19 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 }
                 focusPt?.let { p -> Canvas(Modifier.fillMaxSize()) { drawCircle(Color.White, 34.dp.toPx(), p, style = Stroke(3f)) } }
                 if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
+                Box(Modifier.fillMaxSize().border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(28.dp)))   // glass edge
 
                 if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp), bg = overlayBg) { haptics.select(); picked = null }
-                if (rawActive && picked == null) Text(
+                if (recording) Row(
+                    Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(12.dp))
+                        .background(overlayBg).padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
+                    Spacer(Modifier.width(8.dp))
+                    Text(fmtTime(recSec), color = Color.White, fontSize = 13.sp)
+                }
+                if (rawActive && picked == null && !recording) Text(
                     "RAW", Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(10.dp))
                         .background(overlayBg).padding(horizontal = 10.dp, vertical = 4.dp),
                     color = Color(0xFFFFD23F), fontSize = 12.sp)
@@ -446,7 +512,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 // zoom presets + readout
                 if (picked == null && zoomMax > zoomMin + 0.01f) Row(
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xAA000000)).padding(4.dp),
+                        .background(overlayBg).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
                     listOf(0.5f, 1f, 2f, 5f).filter { it >= zoomMin - 0.01f && it <= zoomMax + 0.01f }.forEach { p ->
@@ -519,14 +585,14 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             // MIN—MAX slider pill + shuffle
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
-                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(Color(0xFF1C1C1C)).padding(horizontal = 14.dp),
+                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(GlassFill).border(1.dp, GlassEdge, RoundedCornerShape(26.dp)).padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("MIN", fontSize = 10.sp, color = Color.Gray)
+                    Text("MIN", fontSize = 10.sp, color = Color(0xB3FFFFFF))
                     Slider(amount, { v -> if ((v * 10).toInt() != (amount * 10).toInt()) haptics.tick(); amount = v },
                         Modifier.weight(1f).padding(horizontal = 6.dp),
-                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.DarkGray))
-                    Text("MAX", fontSize = 10.sp, color = Color.Gray)
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color(0x55FFFFFF)))
+                    Text("MAX", fontSize = 10.sp, color = Color(0xB3FFFFFF))
                 }
                 RoundBtn("🎲") { haptics.heavy(); seed = System.nanoTime() }
             }
@@ -537,10 +603,18 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 RoundBtn("#", active = grid) { grid = !grid; haptics.toggle(grid) }
                 IconBtn(onClick = { haptics.select(); galleryLauncher.launch("image/*") }) { ImportIcon() }
                 Box(
-                    Modifier.size(72.dp).clip(CircleShape).border(4.dp, if (busy) Color.Gray else Color.White, CircleShape).padding(7.dp)
-                        .clip(CircleShape).background(if (busy) Color.Gray else Color.White)
-                        .clickable { shoot() }
-                )
+                    Modifier.size(72.dp).clip(CircleShape).border(4.dp, if (busy) Color.Gray else Color.White, CircleShape)
+                        .pointerInput(recording, picked, busy) {
+                            detectTapGestures(
+                                onLongPress = { if (!recording && picked == null && !busy) startVideo() },
+                                onTap = { if (recording) stopVideo() else shoot() }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (recording) Box(Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFFFF3B30)))
+                    else Box(Modifier.fillMaxSize().padding(7.dp).clip(CircleShape).background(if (busy) Color.Gray else Color.White))
+                }
                 RoundBtn("⟲") { haptics.select(); picked = null; front = !front }
                 IconBtn(active = torch, onClick = { torch = !torch; haptics.toggle(torch) }) { FlashlightIcon(torch) }
             }
@@ -629,9 +703,9 @@ private fun Seg(options: List<String>, selected: Int, enabled: List<Boolean>, on
 }
 
 @Composable
-private fun IconBtn(active: Boolean = false, bg: Color = Color(0xFF1C1C1C), onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+private fun IconBtn(active: Boolean = false, bg: Color = GlassFill, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
     Box(
-        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0xFF3A3A42) else bg).clickable(onClick = onClick),
+        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0x59FFFFFF) else bg).border(1.dp, GlassEdge, CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center, content = content
     )
 }
@@ -677,10 +751,10 @@ private fun ImportIcon() {
 }
 
 @Composable
-private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, bg: Color = Color(0xFF1C1C1C), onClick: () -> Unit) {
+private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, bg: Color = GlassFill, onClick: () -> Unit) {
     Box(
         modifier.size(52.dp).clip(CircleShape)
-            .background(if (active) Color(0xFF2F7BFF) else bg).clickable(onClick = onClick),
+            .background(if (active) Color(0xFF2F7BFF) else bg).border(1.dp, GlassEdge, CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, fontSize = 20.sp, color = Color.White) }
 }
@@ -712,3 +786,25 @@ private fun save(activity: ComponentActivity, bmp: Bitmap) {
     val uri = activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
     if (uri != null) activity.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 97, it) }
 }
+
+private val GlassFill = Color(0x2EFFFFFF)   // frosted glass over the blurred backdrop
+private val GlassEdge = Color(0x26FFFFFF)
+
+private fun fmtTime(sec: Int) = String.format("%d:%02d", sec / 60, sec % 60)
+
+/** Copies the finished MP4 into Movies/SyntaxCam so it shows up in the phone's gallery. */
+private fun saveVideo(activity: ComponentActivity, file: File): Boolean = try {
+    val values = ContentValues().apply {
+        put(MediaStore.Video.Media.DISPLAY_NAME, "SyntaxCam_${System.currentTimeMillis()}.mp4")
+        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SyntaxCam")
+    }
+    val uri = activity.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+    if (uri == null) {
+        false
+    } else {
+        activity.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+        file.delete()
+        true
+    }
+} catch (e: Throwable) { false }

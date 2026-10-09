@@ -12,15 +12,29 @@ android {
         applicationId = "com.example.syntaxcam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 16
-        versionName = "2.4.0"
+        versionCode = 18
+        versionName = "2.5.0"
+    }
+
+    // Permanent release key (from GitHub secrets) so every new APK updates the installed app in place.
+    val releaseKeystore: String? = System.getenv("KEYSTORE_FILE")
+    val hasReleaseKey = releaseKeystore != null && File(releaseKeystore).exists()
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = File(releaseKeystore!!)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Debug-signed so the APK installs directly. Use your own keystore for Play Store.
-            signingConfig = signingConfigs.getByName("debug")
+            // Falls back to the debug key when no release key is configured.
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
     compileOptions {

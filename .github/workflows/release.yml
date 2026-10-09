@@ -16,7 +16,28 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
-      - run: gradle :app:assembleRelease
+
+      # Same signing key on every build => the new APK installs over the old app (no uninstall needed).
+      # Without the secrets it falls back to a temporary debug key (updates then need an uninstall).
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Using the permanent release key"
+          else
+            echo "No KEYSTORE_B64 secret: using the debug key"
+          fi
+
+      - name: Build
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleRelease
+
       - run: mv app/build/outputs/apk/release/app-release.apk SyntaxCam.apk
       - uses: actions/upload-artifact@v4
         with: { name: SyntaxCam, path: SyntaxCam.apk }

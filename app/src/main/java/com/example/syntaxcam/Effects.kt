@@ -25,6 +25,13 @@ enum class Effect(val label: String) {
 
 object Effects {
 
+    /** Heavily blurred copy of a frame, used as the frosted-glass backdrop behind the camera UI. */
+    fun blurBackdrop(src: Bitmap): Bitmap {
+        val w = max(src.width / 22, 8); val h = max(src.height / 22, 8)
+        val a = Bitmap.createScaledBitmap(src, w, h, true)
+        return Bitmap.createScaledBitmap(a, w * 4, h * 4, true)
+    }
+
     /** Applies several effects in order (the order you tapped them). */
     fun applyAll(src: Bitmap, list: List<Effect>, amount: Float, seed: Long): Bitmap {
         var bmp = src
