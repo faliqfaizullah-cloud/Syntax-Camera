@@ -18,7 +18,9 @@ enum class Effect(val label: String) {
     TRACK("TRACK"),       // red tracking boxes + redaction blocks
     FRAME("FRAME"),       // black canvas, tilted crop, dashed geometry
     MATRIX("MATRIX"),     // green 1-bit dither + falling 0/1 code rain
-    SPIDE("SPIDE")        // red bugs: photo-filled cutouts, or red bugs over the photo
+    SPIDE("SPIDE"),       // red bugs: photo-filled cutouts, or red bugs over the photo
+    CAMCORDER("CAMCORDER 2005"), // MiniDV: soft low-res video, cool lavender cast, scan lines, tape noise
+    GAMEBOY("GAME BOY CAM")      // 4-tone green palette with ordered dither, chunky pixels
 }
 
 object Effects {
@@ -38,6 +40,8 @@ object Effects {
             Effect.WARP -> return warp(src, amount, seed)
             Effect.MATRIX -> return matrix(src, amount, seed)
             Effect.SPIDE -> return spide(src, amount, seed)
+            Effect.CAMCORDER -> return camcorder(src, amount, seed)
+            Effect.GAMEBOY -> return gameboy(src, amount)
             else -> {}
         }
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
@@ -199,6 +203,72 @@ object Effects {
         }
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(px, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    /** CAMCORDER 2005 (MiniDV, scan lines): soft low-res video, chroma bleed, cool lavender cast, scan lines, tape noise. */
+    private fun camcorder(src: Bitmap, amount: Float, seed: Long): Bitmap {
+        val w = src.width; val h = src.height
+        val k = w / 540f
+        // 1) MiniDV softness: shrink, then enlarge with filtering
+        val f = 0.80f - 0.35f * amount
+        val lw = (w * f).toInt().coerceAtLeast(16); val lh = (h * f).toInt().coerceAtLeast(16)
+        val soft = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(src, lw, lh, true), w, h, true)
+        val px = IntArray(w * h); soft.getPixels(px, 0, w, 0, 0, w, h)
+        val out = IntArray(w * h)
+        val bleed = max(1, (2f * k * (0.6f + amount)).roundToInt())      // colour smear sideways
+        val ls = max(1, k.roundToInt())                                   // scan-line thickness
+        val lineStrength = 0.14f + 0.26f * amount
+        val rnd = java.util.Random(seed)
+        val noiseAmp = 5f + 14f * amount
+        val noise = IntArray(4096) { (rnd.nextGaussian() * noiseAmp).toInt() }
+        val off = (((System.currentTimeMillis() / 33L) * 997L) % 4096L).toInt()   // tape noise moves every frame
+        for (y in 0 until h) {
+            val row = y * w
+            val line = if (((y / ls) and 1) == 1) 1f - lineStrength else 1f
+            for (x in 0 until w) {
+                var r = ((px[row + min(w - 1, x + bleed)] shr 16) and 255).toFloat()   // red bleeds right
+                var g = ((px[row + x] shr 8) and 255).toFloat()
+                var b = (px[row + max(0, x - bleed)] and 255).toFloat()                // blue bleeds left
+                val l0 = 0.30f * r + 0.59f * g + 0.11f * b
+                r = l0 + (r - l0) * 1.25f; g = l0 + (g - l0) * 1.25f; b = l0 + (b - l0) * 1.25f   // saturate
+                r = (r - 128f) * 1.18f + 128f; g = (g - 128f) * 1.18f + 128f; b = (b - 128f) * 1.18f + 128f
+                val lum = 0.30f * r + 0.59f * g + 0.11f * b
+                r = r * 0.88f + 10f * (lum / 255f)       // lavender highlights
+                g *= 0.97f
+                b = b * 1.20f + 12f                       // cool blue cast
+                if (lum < 90f) { g += 7f; b += 6f }       // teal-ish shadows
+                val n = noise[(x * 7 + y * 13 + off) and 4095]
+                r = r * line + n; g = g * line + n; b = b * line + n
+                out[row + x] = (0xFF shl 24) or
+                    (r.coerceIn(0f, 255f).toInt() shl 16) or (g.coerceIn(0f, 255f).toInt() shl 8) or b.coerceIn(0f, 255f).toInt()
+            }
+        }
+        val res = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        res.setPixels(out, 0, w, 0, 0, w, h)
+        return res
+    }
+
+    /** GAME BOY CAM (4-tone green dither): low chunky resolution, 4 classic greens, Bayer ordered dither. */
+    private fun gameboy(src: Bitmap, amount: Float): Bitmap {
+        val w = src.width; val h = src.height
+        val cols = min(w, (176 - 80 * amount).toInt())            // slider: finer -> chunkier pixels
+        val rows = max(1, (h.toLong() * cols / w).toInt())
+        val small = Bitmap.createScaledBitmap(src, cols, rows, true)
+        val px = IntArray(cols * rows); small.getPixels(px, 0, cols, 0, 0, cols, rows)
+        val pal = intArrayOf(0xFF0F380F.toInt(), 0xFF306230.toInt(), 0xFF8BAC0F.toInt(), 0xFF9BBC0F.toInt())
+        val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val p = px[y * cols + x]
+            var lum = 0.30f * ((p shr 16) and 255) + 0.59f * ((p shr 8) and 255) + 0.11f * (p and 255)
+            lum = ((lum - 128f) * 1.3f + 128f).coerceIn(0f, 255f)    // punchy contrast like the real camera
+            val t = (bayer[(y and 3) * 4 + (x and 3)] + 0.5f) / 16f - 0.5f
+            px[y * cols + x] = pal[(lum / 255f * 3f + t).roundToInt().coerceIn(0, 3)]
+        }
+        val pix = Bitmap.createBitmap(cols, rows, Bitmap.Config.ARGB_8888)
+        pix.setPixels(px, 0, cols, 0, 0, cols, rows)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(pix, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), Paint().apply { isFilterBitmap = false })
         return out
     }
 
