@@ -5,6 +5,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
@@ -13,20 +14,21 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,10 +38,16 @@ import kotlin.random.Random
 
 private class Star(val x: Float, val y: Float, val r: Float, val speed: Float, val phase: Float)
 
-/** Black starfield, chrome balloon-style title, glowing planet horizon, swipe up to enter. */
+/**
+ * Opening screen: black starfield, chrome-balloon "SYN TAX" logo (pre-rendered artwork),
+ * planet horizon with a glass rim and a teal glow, "Swipe up to enter".
+ */
 @Composable
 fun WelcomeScreen(onStart: () -> Unit) {
     val density = LocalDensity.current
+    val cfg = LocalConfiguration.current
+    val screenW = cfg.screenWidthDp
+    val screenH = cfg.screenHeightDp
     val view = LocalView.current
     val haptics = remember(view) { Haptics(view) }
     val scope = rememberCoroutineScope()
@@ -56,7 +64,7 @@ fun WelcomeScreen(onStart: () -> Unit) {
     }
     val stars = remember {
         val rnd = Random(11)
-        List(230) { Star(rnd.nextFloat(), rnd.nextFloat(), 0.4f + rnd.nextFloat() * 1.1f, 0.4f + rnd.nextFloat() * 1.6f, rnd.nextFloat() * 6.28f) }
+        List(280) { Star(rnd.nextFloat(), rnd.nextFloat(), rnd.nextFloat(), 0.4f + rnd.nextFloat() * 1.6f, rnd.nextFloat() * 6.28f) }
     }
     val enter: () -> Unit = {
         scope.launch {
@@ -87,66 +95,96 @@ fun WelcomeScreen(onStart: () -> Unit) {
                 )
             }
     ) {
-        // Sky + planet
+        // ---- sky + planet ----
         Canvas(Modifier.fillMaxSize()) {
             val w = this.size.width; val h = this.size.height
             drawRect(Color.Black)
+
+            // fine, faint stars
             stars.forEach { s ->
-                val y = ((s.y + time * s.speed * 0.003f) % 1f) * h
-                val a = (0.12f + 0.5f * (sin(time * s.speed + s.phase) * 0.5f + 0.5f)) * intro.value
-                drawCircle(Color.White.copy(alpha = a), s.r * density.density, Offset(s.x * w, y))
+                val y = ((s.y + time * s.speed * 0.0012f) % 1f) * h
+                val tw = 0.5f + 0.5f * sin(time * s.speed + s.phase)
+                val a = (0.12f + 0.55f * tw * (0.4f + 0.6f * s.r)) * intro.value
+                val rad = (0.22f + s.r * s.r * 0.55f) * density.density
+                drawCircle(Color(0xFFDDE6FF).copy(alpha = a.coerceIn(0f, 1f)), rad, Offset(s.x * w, y))
             }
-            val pr = w * 0.98f
+
+            // planet: a wide, gently curved horizon
+            val R = w * 0.60f
             val cx = w / 2f
-            val top = h * (0.74f + 0.25f * (1f - intro.value)) - progress.value * h * 0.95f
-            val cy = top + pr
-            // atmosphere halo
+            val top = h * (0.716f + 0.25f * (1f - intro.value)) - progress.value * h * 0.95f
+            val cy = top + R
+            val c = Offset(cx, cy)
+
+            // faint atmosphere above the rim
             drawCircle(
                 Brush.radialGradient(
-                    0.86f to Color.Transparent, 0.95f to Color(0x3A6A9CFF), 1f to Color.Transparent,
-                    center = Offset(cx, cy), radius = pr * 1.18f
-                ), radius = pr * 1.18f, center = Offset(cx, cy)
+                    0.90f to Color.Transparent, 0.965f to Color(0x2A2A4C7A), 1f to Color.Transparent,
+                    center = c, radius = R * 1.14f
+                ), radius = R * 1.14f, center = c
             )
-            // body
+            // glass rim: silver-blue disc, then the body shifted down leaves a crescent (thick at the top, thin at the sides)
+            drawCircle(
+                Brush.verticalGradient(listOf(Color(0xFFC3CAD6), Color(0xFF8993A3), Color(0x44606A7A)), startY = top, endY = top + R * 0.75f),
+                R, c
+            )
+            val rimTop = 10.dp.toPx(); val rimSide = 3.5.dp.toPx()
+            val bodyC = Offset(cx, cy + rimTop)
             drawCircle(
                 Brush.verticalGradient(
-                    listOf(Color(0xFF2C323E), Color(0xFF161C26), Color(0xFF123B48), Color(0xFF1C6A80)),
-                    startY = top, endY = top + pr * 1.1f
-                ), pr, Offset(cx, cy)
+                    listOf(Color(0xFF0E131B), Color(0xFF121B26), Color(0xFF15303D), Color(0xFF1A5262)),
+                    startY = top, endY = h
+                ), R - rimSide, bodyC
             )
-            // soft rim glow + sharp rim light
+            // soft light just inside the rim, and a thin bright edge line
             drawCircle(
-                Brush.verticalGradient(listOf(Color(0x66BBD2F5), Color.Transparent), startY = top, endY = top + pr * 0.5f),
-                pr + 5.dp.toPx(), Offset(cx, cy), style = Stroke(width = 18.dp.toPx())
+                Brush.verticalGradient(listOf(Color(0x555C7390), Color.Transparent), startY = top, endY = top + R * 0.40f),
+                R - rimSide - 1f, bodyC, style = Stroke(18.dp.toPx())
             )
             drawCircle(
-                Brush.verticalGradient(listOf(Color(0xFFF2F6FF), Color(0x88C6D6F0), Color.Transparent), startY = top, endY = top + pr * 0.55f),
-                pr, Offset(cx, cy), style = Stroke(width = 4.dp.toPx())
+                Brush.verticalGradient(listOf(Color(0x99FFFFFF), Color(0x00FFFFFF)), startY = top, endY = top + R * 0.5f),
+                R, c, style = Stroke(1.2.dp.toPx())
             )
         }
 
-        // Chrome balloon title
-        Column(
-            Modifier.align(Alignment.Center).offset(y = (-96).dp).graphicsLayer {
-                translationY = sin(time * 1.2f) * 6.dp.toPx() - progress.value * this.size.height * 0.6f
-                rotationZ = sin(time * 0.7f) * 1.2f
-                val sc = 0.88f + 0.12f * intro.value
-                scaleX = sc; scaleY = sc
-                alpha = intro.value * (1f - progress.value * 1.5f).coerceIn(0f, 1f)
-            },
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Chrome("SYN", 104, -4f, Modifier.offset(x = (-20).dp))
-            Chrome("TAX", 104, 3f, Modifier.offset(x = 16.dp, y = (-26).dp))
-            Chrome("CAM", 104, -2f, Modifier.offset(x = (-8).dp, y = (-52).dp))
-        }
+        // ---- chrome balloon logo (SYN / TAX) ----
+        val logoW = screenW * 0.56f
+        val logoH = logoW * 720f / 873f
+        Image(
+            painterResource(R.drawable.logo_syntax), "Syntax Cam",
+            Modifier.align(Alignment.TopCenter)
+                .padding(top = (screenH * 0.45f - logoH / 2f).dp)
+                .width(logoW.dp)
+                .graphicsLayer {
+                    translationY = sin(time * 1.2f) * 6.dp.toPx() - progress.value * screenH.dp.toPx() * 0.5f
+                    rotationZ = sin(time * 0.7f) * 1.2f
+                    val sc = 0.85f + 0.15f * intro.value
+                    scaleX = sc; scaleY = sc
+                    alpha = intro.value * (1f - progress.value * 1.5f).coerceIn(0f, 1f)
+                    compositingStrategy = CompositingStrategy.Offscreen
+                }
+                .drawWithContent {
+                    drawContent()
+                    // slow glint across the chrome
+                    val x = (((time * 0.28f) % 2.4f) - 0.7f) * this.size.width
+                    drawRect(
+                        Brush.linearGradient(
+                            listOf(Color.Transparent, Color(0x55FFFFFF), Color.Transparent),
+                            start = Offset(x - this.size.width * 0.12f, 0f),
+                            end = Offset(x + this.size.width * 0.12f, this.size.height * 0.35f)
+                        ),
+                        blendMode = BlendMode.SrcAtop
+                    )
+                },
+            contentScale = ContentScale.Fit
+        )
 
         Text(
             "Swipe up to enter",
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 110.dp)
-                .graphicsLayer { alpha = (0.55f + 0.3f * sin(time * 2f)) * (1f - progress.value) * intro.value }
+            Modifier.align(Alignment.BottomCenter).padding(bottom = (screenH * 0.095f).dp)
+                .graphicsLayer { alpha = (0.78f + 0.17f * sin(time * 2f)) * (1f - progress.value) * intro.value }
                 .clickable { enter() },
-            color = Color(0xCCDDE6F0), fontSize = 17.sp, letterSpacing = 0.5.sp
+            color = Color(0xFFC3C9D3), fontSize = 17.sp
         )
 
         // fade to black as the planet fills the screen
@@ -154,26 +192,5 @@ fun WelcomeScreen(onStart: () -> Unit) {
             val p = progress.value
             drawRect(Color.Black.copy(alpha = p * p * p))
         })
-    }
-}
-
-/** Faux inflated-chrome lettering: silver outline, blue-steel gradient fill, white specular edge. */
-@Composable
-private fun Chrome(text: String, sizeSp: Int, rot: Float, modifier: Modifier = Modifier) {
-    val base = TextStyle(
-        fontSize = sizeSp.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.SansSerif,
-        letterSpacing = (-3).sp, lineHeight = sizeSp.sp
-    )
-    Box(modifier.graphicsLayer { rotationZ = rot }) {
-        Text(text, style = base.copy(
-            brush = Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFF6F7480))),
-            drawStyle = Stroke(width = 30f, join = StrokeJoin.Round)))
-        Text(text, style = base.copy(
-            brush = Brush.verticalGradient(
-                0f to Color(0xFFF7FAFF), 0.28f to Color(0xFFA9C0F0), 0.5f to Color(0xFF28437F),
-                0.72f to Color(0xFF7E9AD6), 1f to Color(0xFFDDE6F5))))
-        Text(text, style = base.copy(
-            brush = SolidColor(Color.White.copy(alpha = 0.5f)),
-            drawStyle = Stroke(width = 2f, join = StrokeJoin.Round)))
     }
 }
