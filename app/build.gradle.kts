@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.syntaxcam"
         minSdk = 29
         targetSdk = 34
-        versionCode = 24
-        versionName = "2.9.1"
+        versionCode = 25
+        versionName = "3.0.0"
     }
 
     // Permanent release key (from GitHub secrets) so every new APK updates the installed app in place.

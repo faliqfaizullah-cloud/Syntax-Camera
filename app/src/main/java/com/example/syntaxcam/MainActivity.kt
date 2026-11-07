@@ -37,6 +37,18 @@ import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.hypot
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -373,7 +385,11 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     val effectList = remember { Effect.values().toList() }
     val screenW = LocalConfiguration.current.screenWidthDp
     var prevFrame by remember { mutableStateOf<Bitmap?>(null) }
-    val fade = remember { Animatable(1f) }
+    val fade = remember { Animatable(1f) }          // 0..1 progress of the liquid reveal when filters change
+    var blobOrigin by remember { mutableStateOf(Offset.Unspecified) }
+    val itemCoords = remember { HashMap<Int, LayoutCoordinates>() }
+    var cardRect by remember { mutableStateOf(Rect.Zero) }
+    var rootSize by remember { mutableStateOf(IntSize.Zero) }
     var lastPinch by remember { mutableLongStateOf(0L) }
     var userDrag by remember { mutableStateOf(false) }
 
@@ -381,7 +397,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     LaunchedEffect(selected) {
         prevFrame = frame
         fade.snapTo(0f)
-        fade.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+        fade.animateTo(1f, tween(780, easing = FastOutSlowInEasing))
         prevFrame = null
     }
     // dragging the carousel picks the filter that settles in the centre
@@ -395,7 +411,10 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 val li = listState.layoutInfo
                 val vc = (li.viewportStartOffset + li.viewportEndOffset) / 2
                 val idx = li.visibleItemsInfo.minByOrNull { kotlin.math.abs(it.offset + it.size / 2 - vc) }?.index
-                if (idx != null && selected != listOf(effectList[idx])) { selected = listOf(effectList[idx]); haptics.tick() }
+                if (idx != null && selected != listOf(effectList[idx])) {
+                    blobOrigin = itemCoords[idx]?.boundsInRoot()?.center ?: Offset.Unspecified
+                    selected = listOf(effectList[idx]); haptics.tick()
+                }
             }
         }
     }
@@ -416,8 +435,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         }
     }
 
-    val overlayBg = Color(0xCC2A2A2A)
-    Box(Modifier.fillMaxSize().background(Color(0xFF111111))) {
+    val frostCtx = FrostCtx(bgBlur?.asImageBitmap(), Rect(0f, 0f, rootSize.width.toFloat(), rootSize.height.toFloat()), cardRect)
+    CompositionLocalProvider(LocalFrost provides frostCtx) {
+    Box(Modifier.fillMaxSize().background(Color(0xFF111111)).onSizeChanged { rootSize = it }) {
         // dark frosted-glass backdrop: the live frame, heavily blurred and tinted dark
         bgBlur?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop, filterQuality = FilterQuality.High) }
         Box(Modifier.fillMaxSize().background(Color(0x99000000)))
@@ -428,6 +448,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             // ===== rounded preview card: pinch = zoom, tap = focus, swipe = previous/next filter =====
             Box(
                 Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Color(0xFF0E0E0E))
+                .onGloballyPositioned { cardRect = it.boundsInRoot() }
                 .pointerInput(cam, picked) {
                     detectTransformGestures { _, _, z, _ ->
                         val c = cam ?: return@detectTransformGestures
@@ -461,6 +482,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                                 val cur = effectList.indexOf(selected.lastOrNull() ?: Effect.TIME)
                                 val n = effectList.size
                                 val next = if (dx < 0) (cur + 1) % n else (cur - 1 + n) % n
+                                blobOrigin = Offset.Unspecified
                                 selected = listOf(effectList[next]); haptics.tick()
                                 scope.launch { listState.animateScrollToItem(next) }
                             }
@@ -471,13 +493,23 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             ) {
                 frame?.let { f ->
                     Image(f.asImageBitmap(), null,
-                        Modifier.fillMaxSize().graphicsLayer { val k = 1.05f - 0.05f * fade.value; scaleX = k; scaleY = k },
+                        Modifier.fillMaxSize().graphicsLayer { val k = 1f + 0.025f * (1f - fade.value); scaleX = k; scaleY = k },
                         contentScale = ContentScale.Crop)
                 }
                 prevFrame?.let { pf ->
-                    Image(pf.asImageBitmap(), null,
-                        Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value },
-                        contentScale = ContentScale.Crop)
+                    // the new look spreads out of the tapped filter like liquid; the old look is what is left outside the blob
+                    val pfi = pf.asImageBitmap()
+                    Canvas(Modifier.fillMaxSize()) {
+                        val o0 = if (blobOrigin == Offset.Unspecified) Offset(size.width / 2f, size.height / 2f) else blobOrigin - cardRect.topLeft
+                        val maxR = hypot(maxOf(o0.x, size.width - o0.x), maxOf(o0.y, size.height - o0.y)) * 1.12f
+                        val b = fade.value
+                        val amp = 0.6f + kotlin.math.sin(Math.PI.toFloat() * b)
+                        val path = liquidBlob(o0, maxR * b, b * 9f, amp)
+                        clipPath(path, clipOp = ClipOp.Difference) { frostCover(pfi, 0f, 0f, size.width, size.height) }
+                        val rimA = 1f - b
+                        drawPath(path, Color(0xFF9CC2FF).copy(alpha = rimA * 0.35f), style = Stroke(9.dp.toPx()))
+                        drawPath(path, Color.White.copy(alpha = rimA * 0.6f), style = Stroke(3.dp.toPx()))
+                    }
                 }
                 if (grid) Canvas(Modifier.fillMaxSize()) {
                     val c = Color(0x88FFFFFF)
@@ -490,10 +522,10 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 if (flashing) Box(Modifier.fillMaxSize().background(Color(0x99FFFFFF)))
                 Box(Modifier.fillMaxSize().border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(28.dp)))   // glass edge
 
-                if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp), bg = overlayBg) { haptics.select(); picked = null }
+                if (picked != null) RoundBtn("✕", Modifier.align(Alignment.TopStart).padding(12.dp), inCard = true) { haptics.select(); picked = null }
                 if (recording) Row(
                     Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(12.dp))
-                        .background(overlayBg).padding(horizontal = 12.dp, vertical = 6.dp),
+                        .frostedGlass(RoundedCornerShape(12.dp), true).padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
@@ -502,17 +534,17 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 }
                 if (rawActive && picked == null && !recording) Text(
                     "RAW", Modifier.align(Alignment.TopCenter).padding(top = 18.dp).clip(RoundedCornerShape(10.dp))
-                        .background(overlayBg).padding(horizontal = 10.dp, vertical = 4.dp),
+                        .frostedGlass(RoundedCornerShape(10.dp), true).padding(horizontal = 10.dp, vertical = 4.dp),
                     color = Color(0xFFFFD23F), fontSize = 12.sp)
                 Row(Modifier.align(Alignment.TopEnd).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    RoundBtn("🗓", bg = overlayBg) { haptics.select(); onOpenGallery() }
-                    RoundBtn("⚙", bg = overlayBg) { haptics.select(); showSettings = true }
+                    RoundBtn("🗓", inCard = true) { haptics.select(); onOpenGallery() }
+                    RoundBtn("⚙", inCard = true) { haptics.select(); showSettings = true }
                 }
 
                 // zoom presets + readout
                 if (picked == null && zoomMax > zoomMin + 0.01f) Row(
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).clip(RoundedCornerShape(20.dp))
-                        .background(overlayBg).padding(4.dp),
+                        .frostedGlass(RoundedCornerShape(20.dp), true).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
                 ) {
                     listOf(0.5f, 1f, 2f, 5f).filter { it >= zoomMin - 0.01f && it <= zoomMax + 0.01f }.forEach { p ->
@@ -531,11 +563,12 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             }
             Spacer(Modifier.height(14.dp))
 
-            // filter carousel (circles + labels)
+            // frosted dock holding the carousel, slider and buttons
+            Column(Modifier.fillMaxWidth().frostedGlass(RoundedCornerShape(34.dp), false, darken = 0.18f, milk = 0.05f).padding(vertical = 14.dp)) {
             LazyRow(
                 state = listState,
                 flingBehavior = rememberSnapFlingBehavior(listState),
-                contentPadding = PaddingValues(horizontal = ((screenW - 78) / 2).coerceAtLeast(0).dp),
+                contentPadding = PaddingValues(horizontal = ((screenW - 24 - 78) / 2).coerceAtLeast(0).dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 itemsIndexed(effectList) { i, e ->
@@ -555,8 +588,10 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                                     scaleX = k; scaleY = k; alpha = 1f - 0.5f * d
                                 }
                             }
+                            .onGloballyPositioned { itemCoords[i] = it }
                             .clickable {
                                 haptics.tick()
+                                blobOrigin = itemCoords[i]?.boundsInRoot()?.center ?: Offset.Unspecified
                                 selected = if (sel) selected - e else selected + e
                                 scope.launch { listState.animateScrollToItem(i) }
                             }
@@ -570,8 +605,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                                 thumbs[e]?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
                                 Box(Modifier.size(14.dp).clip(CircleShape).background(Color(0xFF111111)).align(Alignment.Center))
                             }
-                            if (sel) Box(
-                                Modifier.size(22.dp).clip(CircleShape).background(Color(0xFF2F7BFF)).align(Alignment.BottomEnd),
+                            val pop by animateFloatAsState(if (sel) 1f else 0f, spring(dampingRatio = 0.4f, stiffness = 420f), label = "pop")
+                            if (pop > 0.01f) Box(
+                                Modifier.graphicsLayer { scaleX = pop; scaleY = pop }.size(22.dp).clip(CircleShape).background(Color(0xFF2F7BFF)).align(Alignment.BottomEnd),
                                 contentAlignment = Alignment.Center
                             ) { Text("${idx + 1}", fontSize = 11.sp, color = Color.White) }
                         }
@@ -583,9 +619,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             Spacer(Modifier.height(14.dp))
 
             // MIN—MAX slider pill + shuffle
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(
-                    Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(GlassFill).border(1.dp, GlassEdge, RoundedCornerShape(26.dp)).padding(horizontal = 14.dp),
+                    Modifier.weight(1f).height(52.dp).frostedGlass(RoundedCornerShape(26.dp), false, darken = 0.08f, milk = 0.05f).padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("MIN", fontSize = 10.sp, color = Color(0xB3FFFFFF))
@@ -599,7 +635,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             Spacer(Modifier.height(14.dp))
 
             // grid | import (+) | shutter | flip | flashlight
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 RoundBtn("#", active = grid) { grid = !grid; haptics.toggle(grid) }
                 IconBtn(onClick = { haptics.select(); galleryLauncher.launch("image/*") }) { ImportIcon() }
                 Box(
@@ -618,6 +654,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 RoundBtn("⟲") { haptics.select(); picked = null; front = !front }
                 IconBtn(active = torch, onClick = { torch = !torch; haptics.toggle(torch) }) { FlashlightIcon(torch) }
             }
+            }
         }
 
         reveal?.let { CaptureReveal(it, haptics) { reveal = null } }
@@ -625,7 +662,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         if (showSettings) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { showSettings = false }) {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)).background(Color(0xFF121218))
+                    .frostedGlass(RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp), false, darken = 0.42f, milk = 0.05f)
                     .pointerInput(Unit) { detectTapGestures { } }
                     .navigationBarsPadding().padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -679,6 +716,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             }
         }
     }
+    }
 }
 
 @Composable
@@ -703,9 +741,9 @@ private fun Seg(options: List<String>, selected: Int, enabled: List<Boolean>, on
 }
 
 @Composable
-private fun IconBtn(active: Boolean = false, bg: Color = GlassFill, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+private fun IconBtn(active: Boolean = false, inCard: Boolean = false, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
     Box(
-        Modifier.size(52.dp).clip(CircleShape).background(if (active) Color(0x59FFFFFF) else bg).border(1.dp, GlassEdge, CircleShape).clickable(onClick = onClick),
+        Modifier.size(52.dp).frostedGlass(CircleShape, inCard, tint = if (active) Color(0x40FFFFFF) else Color.Transparent).clickable(onClick = onClick),
         contentAlignment = Alignment.Center, content = content
     )
 }
@@ -751,10 +789,9 @@ private fun ImportIcon() {
 }
 
 @Composable
-private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, bg: Color = GlassFill, onClick: () -> Unit) {
+private fun RoundBtn(label: String, modifier: Modifier = Modifier, active: Boolean = false, inCard: Boolean = false, onClick: () -> Unit) {
     Box(
-        modifier.size(52.dp).clip(CircleShape)
-            .background(if (active) Color(0xFF2F7BFF) else bg).border(1.dp, GlassEdge, CircleShape).clickable(onClick = onClick),
+        modifier.size(52.dp).frostedGlass(CircleShape, inCard, tint = if (active) Color(0xAA2F7BFF) else Color.Transparent).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, fontSize = 20.sp, color = Color.White) }
 }
