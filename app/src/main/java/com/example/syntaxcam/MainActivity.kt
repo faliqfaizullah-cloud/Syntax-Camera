@@ -92,6 +92,7 @@ private class Params {
     @Volatile var seed = 1L
     @Volatile var picked: Bitmap? = null
     @Volatile var recorder: VideoRecorder? = null
+    @Volatile var style: StyleSpec? = null
 }
 
 class MainActivity : ComponentActivity() {
@@ -178,7 +179,13 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
     var picked by remember { mutableStateOf<Bitmap?>(null) }
     var frame by remember { mutableStateOf<Bitmap?>(null) }
     var thumbs by remember { mutableStateOf<Map<Effect, Bitmap>>(emptyMap()) }
-    params.effects = selected; params.amount = amount; params.seed = seed; params.picked = picked
+    // normal camera: no live filter chain, just an editable style (NUANCE + MATERIAL)
+    var normalMode by remember { mutableStateOf(false) }
+    var camStyle by remember { mutableStateOf(StyleSpec()) }
+    var draftStyle by remember { mutableStateOf<StyleSpec?>(null) }
+    params.effects = if (normalMode) emptyList() else selected
+    params.style = if (normalMode) (draftStyle ?: camStyle) else null
+    params.amount = amount; params.seed = seed; params.picked = picked
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val ioExecutor = remember { Executors.newSingleThreadExecutor() }
 
@@ -256,7 +263,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                         val upright = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
                         proxy.close()
                         val small = Bitmap.createScaledBitmap(upright, 540, (upright.height * 540f / upright.width).toInt(), true)
-                        val pf = Effects.applyAll(small, params.effects, params.amount, params.seed)
+                        val pf0 = Effects.applyAll(small, params.effects, params.amount, params.seed)
+                        val stl0 = params.style
+                        val pf = if (stl0 != null) Styles.apply(pf0, stl0) else pf0
                         frame = pf
                         params.recorder?.addFrame(pf)
                         if ((bgTick++ and 1) == 0) bgBlur = Effects.blurBackdrop(pf)
@@ -326,7 +335,9 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
         if (busy) return@shoot
         busy = true
         val mirror = front
-        val effects = selected; val amt = amount; val sd = seed
+        val effects = if (normalMode) emptyList() else selected
+        val amt = amount; val sd = seed
+        val stl = if (normalMode) camStyle else null
         val ts = System.currentTimeMillis()
 
         if (rawActive) {
@@ -348,7 +359,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                         }
                         if (mirror) bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height,
                             Matrix().apply { postScale(-1f, 1f) }, true)
-                        processAndSave(activity, bmp, effects, amt, sd, " + RAW", onReveal)
+                        processAndSave(activity, bmp, effects, amt, sd, " + RAW", stl, onReveal)
                     } catch (e: Throwable) {
                         toast(activity, "Save failed: ${e.message}")
                     } finally { tmp.delete(); busy = false }
@@ -367,7 +378,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                             if (mirror) postScale(-1f, 1f)
                         }
                         val up = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
-                        processAndSave(activity, up, effects, amt, sd, "", onReveal)
+                        processAndSave(activity, up, effects, amt, sd, "", stl, onReveal)
                     } catch (e: Throwable) {
                         toast(activity, "Save failed: ${e.message}")
                     } finally { image.close(); busy = false }
@@ -539,6 +550,7 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
                 Row(Modifier.align(Alignment.TopEnd).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     RoundBtn("🗓", inCard = true) { haptics.select(); onOpenGallery() }
                     RoundBtn("⚙", inCard = true) { haptics.select(); showSettings = true }
+                    RoundBtn("\u25D0", inCard = true) { haptics.select(); normalMode = true }
                 }
 
                 // zoom presets + readout
@@ -657,6 +669,36 @@ fun CameraScreen(onOpenGallery: () -> Unit = {}) {
             }
         }
 
+        if (normalMode) NormalModeScreen(
+            frame = frame, style = camStyle,
+            onCommit = { camStyle = it }, onDraft = { draftStyle = it },
+            zoom = zoom, zoomMin = zoomMin, zoomMax = zoomMax,
+            onZoomTo = { z ->
+                val c = cam
+                val zs = c?.cameraInfo?.zoomState?.value
+                if (c != null && zs != null) {
+                    val nz = z.coerceIn(zs.minZoomRatio, zs.maxZoomRatio)
+                    zoom = nz; zoomMin = zs.minZoomRatio; zoomMax = zs.maxZoomRatio
+                    c.cameraControl.setZoomRatio(nz)
+                }
+            },
+            focusPt = focusPt,
+            onFocus = { off, sz, hold ->
+                val c = cam
+                if (c != null) {
+                    focusPt = off; haptics.tick()
+                    val pt = SurfaceOrientedMeteringPointFactory(sz.width.toFloat(), sz.height.toFloat()).createPoint(off.x, off.y)
+                    val fb = FocusMeteringAction.Builder(pt)
+                    if (hold) fb.disableAutoCancel()
+                    runCatching { c.cameraControl.startFocusAndMetering(fb.build()) }
+                }
+            },
+            onFlip = { haptics.select(); picked = null; front = !front },
+            recording = recording, recSec = recSec,
+            onShutter = { video -> if (video) { if (recording) stopVideo() else startVideo() } else shoot() },
+            onExit = { normalMode = false; draftStyle = null },
+            haptics = haptics
+        )
         reveal?.let { CaptureReveal(it, haptics) { reveal = null } }
 
         if (showSettings) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { showSettings = false }) {
@@ -800,14 +842,16 @@ private fun toast(activity: ComponentActivity, msg: String) =
     activity.runOnUiThread { Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show() }
 
 /** Applies the chosen effects (capped at ~3000 px so memory stays safe) and saves to Pictures/SyntaxCam + the in-app gallery. */
-private fun processAndSave(activity: ComponentActivity, src: Bitmap, effects: List<Effect>, amount: Float, seed: Long, note: String, onDone: (RevealData) -> Unit) {
+private fun processAndSave(activity: ComponentActivity, src: Bitmap, effects: List<Effect>, amount: Float, seed: Long, note: String, style: StyleSpec?, onDone: (RevealData) -> Unit) {
     var bmp = src
     val m = maxOf(bmp.width, bmp.height)
-    if (effects.isNotEmpty() && m > 3072) {
+    val styleOn = style != null && !Styles.isNoop(style)
+    if ((effects.isNotEmpty() || styleOn) && m > 3072) {
         val s = 3072f / m
         bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * s).toInt(), (bmp.height * s).toInt(), true)
     }
-    val result = if (effects.isEmpty()) bmp else Effects.applyAll(bmp, effects, amount, seed)
+    var result = if (effects.isEmpty()) bmp else Effects.applyAll(bmp, effects, amount, seed)
+    if (style != null && styleOn) result = Styles.apply(result, style)
     save(activity, result)
     val r = makeReveal(result, "${result.width}×${result.height}$note")
     activity.runOnUiThread { onDone(r) }
